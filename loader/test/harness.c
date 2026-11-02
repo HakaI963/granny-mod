@@ -90,12 +90,9 @@ int main(void) {
     /* no mod.json at all -> ignored */
     mkdir("/tmp/gm-fixtures/notamod", 0777);
 
-    setenv("EXTERNAL_MEDIA_DIR", "/tmp/gm-fixtures-parent", 1);
+    setenv("GM_MODS_DIR", "/tmp/gm-fixtures", 1);
     /* gm_mods_tick() derives the path from EXTERNAL_MEDIA_DIR; point the
      * parent so it resolves to the fixture root we just built */
-    if (system("mkdir -p /tmp/gm-fixtures-parent/com.dvloper.granny.mod && "
-               "ln -sfn /tmp/gm-fixtures /tmp/gm-fixtures-parent/com.dvloper.granny.mod/mods"))
-        return 2;
 
     gm_mods_tick();
 

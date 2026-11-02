@@ -274,6 +274,12 @@ static void apply_mod(const mod_t *m) {
     }
 }
 
+static void apply_all(void) {
+    for (int i = 0; i < g_nmods; i++)
+        if (g_mods[i].enabled)
+            apply_mod(&g_mods[i]);
+}
+
 void gm_mods_tick(void) {
     if (!gm_ready())
         return;
@@ -284,16 +290,50 @@ void gm_mods_tick(void) {
         return;
     g_scan_next = now + 3; /* rescan the mods folder every 3s so drops land */
 
-    const char *ext = getenv("EXTERNAL_MEDIA_DIR");
     if (!g_mods_path[0]) {
-        const char *base = ext ? ext : "/storage/emulated/0/Android/media";
-        snprintf(g_mods_path, sizeof g_mods_path, "%s/com.dvloper.granny.mod/mods", base);
+        /* Explicit override: used by the host harness (which cannot read
+         * /proc/self/cmdline to mean anything) and handy for debugging on device. */
+        const char *force = getenv("GM_MODS_DIR");
+        if (force && *force) {
+            snprintf(g_mods_path, sizeof g_mods_path, "%.1000s", force);
+            GM_LOGI("mods directory forced to %s", g_mods_path);
+            mkdir(g_mods_path, 0777);
+            scan();
+            apply_all();
+            return;
+        }
+        /*
+         * The package must be discovered, not baked. This build installs as
+         * com.dvloper.granny.mod, but the clone engine renames it again
+         * (com.altaris.apps.*), and Android only lets a process read its OWN
+         * /sdcard/Android/media/<pkg> directory - a hard-coded name would look
+         * in a directory the app cannot see and silently find no mods.
+         * /proc/self/cmdline holds the process name, which for a normal (non
+         * :subprocess) app process is exactly the package id.
+         */
+        char pkg[256] = {0};
+        FILE *cf = fopen("/proc/self/cmdline", "re");
+        if (cf) {
+            size_t n = fread(pkg, 1, sizeof pkg - 1, cf);
+            fclose(cf);
+            /* cmdline is NUL separated; the first argument is the process name */
+            for (size_t i = 0; i < n; i++)
+                if (pkg[i] == 0) { pkg[i] = 0; break; }
+        }
+        char *colon = strchr(pkg, ':');
+        if (colon)
+            *colon = 0; /* :subprocess processes still own the same media dir */
+        if (!pkg[0])
+            snprintf(pkg, sizeof pkg, "%s", "com.dvloper.granny.mod");
+
+        const char *ext = getenv("EXTERNAL_STORAGE");
+        const char *base = ext && *ext ? ext : "/storage/emulated/0";
+        snprintf(g_mods_path, sizeof g_mods_path, "%s/Android/media/%s/mods", base, pkg);
+        GM_LOGI("mods directory = %s (package %s)", g_mods_path, pkg);
         mkdir(g_mods_path, 0777);
     }
     scan();
-    for (int i = 0; i < g_nmods; i++)
-        if (g_mods[i].enabled)
-            apply_mod(&g_mods[i]);
+    apply_all();
 }
 
 int gm_mod_count(void) {
