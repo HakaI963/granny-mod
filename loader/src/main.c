@@ -243,15 +243,20 @@ static int got_patch_cb(struct dl_phdr_info *info, size_t size, void *data) {
     }
     if (!strtab || !symtab)
         return 1;
-    strtab += bias;
-    symtab += bias;
+    /*
+     * Do NOT bias these. In a loaded ET_DYN image the dynamic linker has
+     * already relocated every DT_* pointer entry, so DT_STRTAB / DT_SYMTAB /
+     * DT_JMPREL / DT_RELA hold absolute addresses. Only an r_offset *inside* a
+     * relocation record is still file-relative. Adding the bias a second time
+     * gave a wild pointer and SIGSEGV at 0xb637c10a2b8 in gm-bind.
+     */
 
     const Elf64_Rela *rels[2] = {pltrel, dynrel};
     size_t reln[2] = {pltrelsz, dynrelsz};
     for (int pass = 0; pass < 2; pass++) {
         if (!rels[pass])
             continue;
-        const Elf64_Rela *rel = (const Elf64_Rela *)((uintptr_t)rels[pass] + bias);
+        const Elf64_Rela *rel = rels[pass]; /* already absolute */
         size_t n = reln[pass];
         for (size_t i = 0; (i + 1) * sizeof(Elf64_Rela) <= n; i++) {
             const Elf64_Rela *e = &rel[i];
@@ -262,7 +267,13 @@ static int got_patch_cb(struct dl_phdr_info *info, size_t size, void *data) {
             const char *rn = strtab + symtab[si].st_name;
             if (strcmp(rn, r->sym) != 0)
                 continue;
+            /* r_offset is the one value here that is still a vaddr */
             void **slot = (void **)(bias + e->r_offset);
+            if ((uintptr_t)slot < bias || (uintptr_t)slot - bias > 0x10000000) {
+                GM_LOGE("implausible GOT offset 0x%lx for %s in %s", (unsigned long)e->r_offset,
+                        r->sym, r->leaf);
+                continue;
+            }
             long ps = sysconf(_SC_PAGESIZE);
             uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(ps - 1);
             if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0) {
