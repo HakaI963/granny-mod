@@ -45,6 +45,11 @@ static bool s_browser_open;
 
 /* ---- reflection helpers used only by the menu --------------------------- */
 
+/* Defined below; used by gm_menu_install. */
+static void log_screen(void);
+static void log_pos(Il2CppObject *go, const char *tag);
+static bool add_text_label(Il2CppObject *parentGo, const char *want);
+
 static Il2CppObject *invoke0(Il2CppMethodInfo *m, Il2CppObject *self) {
     gmi_t *a = A2();
     Il2CppObject *exc = NULL;
@@ -284,6 +289,116 @@ static bool label_clone(Il2CppObject *go, const char *want) {
     return false;
 }
 
+/* ---- boxed values ------------------------------------------------------ */
+
+/* il2cpp_runtime_invoke boxes value-type results, so Vector3 and Int32 come back
+ * as an ordinary Il2CppObject whose payload starts after the 16-byte header
+ * (klass pointer + monitor pointer). */
+static int gm_boxed_int(Il2CppObject *o) {
+    if (!o)
+        return 0;
+    int32_t v;
+    memcpy(&v, (char *)o + 2 * sizeof(void *), sizeof v);
+    return v;
+}
+
+static void log_screen(void) {
+    gmi_t *a = A2();
+    Il2CppClass *scr = gm_class(NULL, "UnityEngine", "Screen");
+    if (!scr)
+        return;
+    Il2CppMethodInfo *w = a->class_get_method_from_name(scr, "get_width", 0);
+    Il2CppMethodInfo *h = a->class_get_method_from_name(scr, "get_height", 0);
+    if (!w || !h)
+        return;
+    GM_LOGI("Unity screen is %dx%d", gm_boxed_int(invoke0(w, NULL)), gm_boxed_int(invoke0(h, NULL)));
+}
+
+/* Position of a GameObject's transform in Unity world/screen units, so a tap can
+ * be aimed at the button we just created. */
+static void log_pos(Il2CppObject *go, const char *tag) {
+    gmi_t *a = A2();
+    Il2CppObject *t = transform_of(go);
+    if (!t)
+        return;
+    Il2CppClass *tc = gm_class(NULL, "UnityEngine", "Transform");
+    if (!tc)
+        return;
+    Il2CppMethodInfo *gp = a->class_get_method_from_name(tc, "get_position", 0);
+    if (!gp)
+        return;
+    Il2CppObject *box = invoke0(gp, t);
+    float x = 0, y = 0;
+    if (box && gm_get_float(box, "x", &x) && gm_get_float(box, "y", &y))
+        GM_LOGI("%s position = (%.1f, %.1f)", tag, x, y);
+    else
+        GM_LOGW("%s: could not read the boxed Vector3", tag);
+}
+
+/* ---- label from a real text element ----------------------------------- */
+
+/*
+ * The tree dump proved every menu button is a leaf: PlayButton/MoreGamesButton/
+ * QuitButton are word-art images with no text child, so there is no label to
+ * edit. 'Build Number' is a text element in the same container, so the Mods
+ * button clones THAT: the copy carries the game's own font, material and
+ * metrics, and only the string changes. That renders "MODS" in Granny's own
+ * typography rather than inventing UI.
+ */
+static bool add_text_label(Il2CppObject *parentGo, const char *want) {
+    gmi_t *a = A2();
+    Il2CppObject *src = gm_find_object("Build Number");
+    if (!src) {
+        GM_LOGW("no 'Build Number' text element to clone for the label");
+        return false;
+    }
+    Il2CppObject *lbl = clone_object(src);
+    if (!lbl)
+        return false;
+
+    Il2CppMethodInfo *setname = method("UnityEngine", "GameObject", "set_name", 1);
+    if (setname)
+        invoke1(setname, lbl, a->string_new("ModsLabel"));
+
+    Il2CppObject *lt = transform_of(lbl);
+    Il2CppObject *pt = transform_of(parentGo);
+    Il2CppMethodInfo *setparent = method("UnityEngine", "Transform", "SetParent", 1);
+    if (setparent && lt && pt)
+        invoke1(setparent, lt, pt);
+    Il2CppMethodInfo *last = method("UnityEngine", "Transform", "SetAsLastSibling", 0);
+    if (last && lt)
+        invoke0(last, lt);
+    if (lt)
+        move_anchored(lt, 0.0f, 0.0f);
+
+    /* The text component is on this object itself, not on a child. */
+    Il2CppMethodInfo *gc = method("UnityEngine", "GameObject", "GetComponent", 1);
+    Il2CppMethodInfo *gt = method("System", "Type", "GetType", 1);
+    if (!gc || !gt) {
+        GM_LOGW("Type.GetType/GetComponent unavailable; cannot set the label text");
+        return false;
+    }
+    static const char *types[] = { "TMPro.TextMeshProUGUI, Unity.TextMeshPro",
+                                   "UnityEngine.UI.Text, UnityEngine.UI", NULL };
+    for (int k = 0; types[k]; k++) {
+        Il2CppObject *tn = invoke1(gt, NULL, a->string_new(types[k]));
+        if (!tn)
+            continue;
+        Il2CppObject *comp = invoke1(gc, lbl, tn);
+        if (!comp)
+            continue;
+        Il2CppClass *cc = a->object_get_class(comp);
+        Il2CppMethodInfo *st = cc ? a->class_get_method_from_name(cc, "set_text", 1) : NULL;
+        if (!st)
+            continue;
+        invoke1(st, comp, a->string_new(want));
+        GM_LOGI("labelled the Mods button '%s' via %s", want, types[k]);
+        return true;
+    }
+    GM_LOGW("cloned a label but found no text component on it");
+    return false;
+}
+
 /* ---- public ------------------------------------------------------------ */
 
 static unsigned s_attempts;
@@ -324,8 +439,12 @@ bool gm_menu_install(void) {
         move_anchored(t, MENU_X, MODS_Y);
 
     dump_ui();
-    if (!label_clone(mods, "Mods"))
-        GM_LOGW("ModsButton has no text child; it will show the inherited label");
+    if (!add_text_label(mods, "Mods") && !label_clone(mods, "Mods"))
+        GM_LOGW("ModsButton has no label; it will show the inherited PLAY art");
+
+    log_screen();
+    log_pos(mods, "ModsButton");
+    log_pos(s_play, "PlayButton");
 
     GM_LOGI("Mods button cloned from PlayButton at (%.1f, %.1f)", MENU_X, MODS_Y);
     return true;
