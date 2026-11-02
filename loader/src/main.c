@@ -104,31 +104,49 @@ static bool gm_resolve_domain(void) {
 static uintptr_t s_il2cpp_base;
 static size_t s_il2cpp_span;
 
-static void gm_map_il2cpp(void *handle) {
-    struct link_map *map = NULL;
-    if (dlinfo(handle, RTLD_DL_LINKMAP, &map) != 0 || !map || !map->l_addr) {
-        GM_LOGE("could not map libil2cpp.so");
-        return;
-    }
-    s_il2cpp_base = (uintptr_t)map->l_addr;
-    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)s_il2cpp_base;
-    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) {
-        GM_LOGE("libil2cpp base does not hold an ELF header");
-        s_il2cpp_base = 0;
-        return;
-    }
-    size_t highest = 0;
-    for (int i = 0; i < eh->e_phnum; i++) {
-        const ElfW(Phdr) *ph = (const ElfW(Phdr) *)(s_il2cpp_base + eh->e_phoff +
-                                                    (size_t)i * eh->e_phentsize);
+struct phdr_walk {
+    uintptr_t base;
+    size_t span;
+};
+
+/*
+ * dl_iterate_phdr is available since API 21. dlinfo/RTLD_DL_LINKMAP are not
+ * usable here: Bionic does not declare them the way glibc does, so a host
+ * compile alone will not catch that (it did not).
+ */
+static int phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    if (!info->dlpi_name)
+        return 0;
+    const char *slash = strrchr(info->dlpi_name, '/');
+    const char *leaf = slash ? slash + 1 : info->dlpi_name;
+    if (strcmp(leaf, "libil2cpp.so") != 0)
+        return 0;
+    struct phdr_walk *w = (struct phdr_walk *)data;
+    w->base = (uintptr_t)info->dlpi_addr;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        /* explicit Elf64_ types: ElfW() is a glibc-ism, and this module is
+         * built for arm64-v8a only */
+        const Elf64_Phdr *ph = &info->dlpi_phdr[i];
         if (ph->p_type == PT_LOAD) {
             size_t end = ph->p_vaddr + ph->p_memsz;
-            if (end > highest)
-                highest = end;
+            if (end > w->span)
+                w->span = end;
         }
     }
-    s_il2cpp_span = highest;
-    GM_LOGI("libil2cpp.so at 0x%lx span 0x%zx", (unsigned long)s_il2cpp_base, s_il2cpp_span);
+    return 1; /* stop walking */
+}
+
+static void gm_map_il2cpp(void) {
+    struct phdr_walk w = {0, 0};
+    dl_iterate_phdr(phdr_cb, &w);
+    if (!w.base || !w.span) {
+        GM_LOGE("libil2cpp.so not found in the program header list");
+        return;
+    }
+    s_il2cpp_base = w.base;
+    s_il2cpp_span = w.span;
+    GM_LOGI("libil2cpp.so mapped at 0x%lx, span 0x%zx", (unsigned long)w.base, w.span);
 }
 
 bool gm_il2cpp_contains(const void *p) {
@@ -231,7 +249,7 @@ bool gm_try_bind(void) {
     if (!gm_resolve_domain())
         return false;
 
-    gm_map_il2cpp(h);
+    gm_map_il2cpp();
 
     /*
      * g_ready must be set *before* the hook/monetisation passes: gm_class()
@@ -240,7 +258,7 @@ bool gm_try_bind(void) {
      * return NULL, so no hook was ever installed.
      */
     atomic_store(&g_ready, true);
-    GM_LOGI("bound: %d assemblies, main thread pump arming", g.nasms);
+    GM_LOGI("bound: %zu assemblies, main thread pump arming", g.nasms);
 
     gm_hooks_install();
     /* disable ads/IAP after hooks so the very first ad request is already gone */
