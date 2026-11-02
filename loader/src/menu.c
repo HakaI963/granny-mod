@@ -177,14 +177,13 @@ static bool label_clone(Il2CppObject *go, const char *want) {
     if (!t)
         return false;
     Il2CppMethodInfo *child = method("UnityEngine", "Transform", "GetChild", 1);
-    Il2CppMethodInfo *count = method("UnityEngine", "Transform", "get_childCount", 0);
-    int n = 0;
-    if (count) {
-        Il2CppObject *r = invoke0(count, t);
-        /* int return comes back boxed-in-register; read it as a small int */
-        n = r ? (int)(intptr_t)r : 0;
-    }
-    for (int i = 0; i <= n && i < 8; i++) {
+    /*
+     * get_childCount returns an int, which il2cpp_runtime_invoke hands back as
+     * a *boxed* value for value types; casting that pointer to an int would be
+     * meaningless. Walking GetChild(i) until it returns null is both correct and
+     * needs no unboxing.
+     */
+    for (int i = 0; i < 12; i++) {
         if (!child)
             break;
         int idx = i;
