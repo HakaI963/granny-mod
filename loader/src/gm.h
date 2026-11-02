@@ -60,6 +60,12 @@ void *gm_api(void);
 bool gm_try_bind(void);
 /* true when p falls inside libil2cpp.so's mapped image */
 bool gm_il2cpp_contains(const void *p);
+/* real page protection of addr from /proc/self/maps, or -1 */
+int gm_page_prot(const void *addr);
+/* make addr's page writable, remembering what it was; returns success */
+bool gm_make_writable(void *addr);
+/* put the recorded protection back (no-op if nothing was recorded) */
+void gm_restore_prot(void *addr);
 void gm_pump_main(void);
 void gm_post(void (*)(void *), void *);
 

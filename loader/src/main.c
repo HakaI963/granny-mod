@@ -326,6 +326,73 @@ static bool gm_got_patch(const char *leaf, const char *sym, void *newval, void *
     return req.hit;
 }
 
+/*
+ * Read the actual protection of the page containing addr from /proc/self/maps.
+ * Needed because the old patch path did mprotect(RW) -> write -> mprotect(RO):
+ * that hard-coded PROT_READ regardless of what was there before, and at page
+ * granularity the page holding a MethodInfo can also hold ordinary writable
+ * il2cpp data. Forcing it read-only then made il2cpp's own later write fault
+ *   signal 11 (SIGSEGV), code 2 (SEGV_ACCERR)  inside __memset_aarch64
+ * which is exactly what both earlier crash traces showed.
+ */
+int gm_page_prot(const void *addr) {
+    char line[512];
+    int prot = -1;
+    FILE *f = fopen("/proc/self/maps", "re");
+    if (!f)
+        return -1;
+    uintptr_t a = (uintptr_t)addr;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long lo = 0, hi = 0;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perms) == 3 && a >= lo && a < hi) {
+            prot = (perms[0] == 'r' ? PROT_READ : 0) | (perms[1] == 'w' ? PROT_WRITE : 0) |
+                   (perms[2] == 'x' ? PROT_EXEC : 0);
+            break;
+        }
+    }
+    fclose(f);
+    return prot;
+}
+
+/* Recorded page protections, so a patch can put back exactly what was there. */
+static struct { uintptr_t page; int prot; } s_saved[4];
+
+bool gm_make_writable(void *addr) {
+    long ps = sysconf(_SC_PAGESIZE);
+    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(ps - 1);
+    int want = gm_page_prot(addr);
+    if (want < 0)
+        want = PROT_READ; /* unknown: assume the minimum we must restore to */
+    for (unsigned i = 0; i < sizeof s_saved / sizeof *s_saved; i++) {
+        if (s_saved[i].page == page) {
+            want = s_saved[i].prot;
+            break;
+        }
+        if (s_saved[i].page == 0) {
+            s_saved[i].page = page;
+            s_saved[i].prot = want;
+            break;
+        }
+    }
+    return mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) == 0;
+}
+
+void gm_restore_prot(void *addr) {
+    long ps = sysconf(_SC_PAGESIZE);
+    uintptr_t page = (uintptr_t)addr & ~(uintptr_t)(ps - 1);
+    for (unsigned i = 0; i < sizeof s_saved / sizeof *s_saved; i++)
+        if (s_saved[i].page == page) {
+            /* Restore exactly what was there. Never hard-code PROT_READ: at page
+             * granularity the same page can hold ordinary writable il2cpp data,
+             * and forcing it read-only makes il2cpp's own later writes fault with
+             * SEGV_ACCERR inside __memset_aarch64 - which is what the two previous
+             * crash traces were showing. */
+            mprotect((void *)page, (size_t)ps, s_saved[i].prot);
+            return;
+        }
+}
+
 bool gm_il2cpp_contains(const void *p) {
     if (!s_il2cpp_span)
         return false;

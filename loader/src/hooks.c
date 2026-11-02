@@ -65,15 +65,13 @@ static bool patch_method(Il2CppClass *c, const char *mname, int argc, void *deto
                 a->class_get_name(c), mname, cur);
         return false;
     }
-    long ps = (long)sysconf(_SC_PAGESIZE);
-    uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(ps - 1);
-    if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0) {
-        GM_LOGE("mprotect failed for %s.%s", a->class_get_name(c), mname);
+    if (!gm_make_writable(slot)) {
+        GM_LOGE("could not make the page holding %s.%s writable", a->class_get_name(c), mname);
         return false;
     }
     *out_orig = cur;
     *slot = detour;
-    mprotect((void *)page, (size_t)ps, PROT_READ);
+    gm_restore_prot(slot);
     GM_LOGI("hooked %s.%s/%d (body was %p)", a->class_get_name(c), mname, argc, cur);
     return true;
 }

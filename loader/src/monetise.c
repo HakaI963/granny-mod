@@ -54,12 +54,10 @@ static bool void_method(const char *cls, const char *method, int argc) {
                 *slot);
         return false;
     }
-    long ps = sysconf(_SC_PAGESIZE);
-    uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(ps - 1);
-    if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0)
+    if (!gm_make_writable(slot))
         return false;
     *slot = (void *)gm_stub_return;
-    mprotect((void *)page, (size_t)ps, PROT_READ);
+    gm_restore_prot(slot);
     GM_LOGI("monetisation: neutralised %s.%s", cls, method);
     return true;
 }
