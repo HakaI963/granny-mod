@@ -1,10 +1,19 @@
 name: modded-apk
 
 on:
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: URL that serves the shipped base APK
+        required: false
+        default: ""
+      split_url:
+        description: URL that serves the arm64 config split APK
+        required: false
+        default: ""
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 env:
   LUA_VERSION: 5.4.7
@@ -32,14 +41,16 @@ jobs:
               -o /tmp/gmtest loader/src/mods.c loader/test/harness.c
           /tmp/gmtest
 
-      - uses: nttld/setup-ndk-action@v1
-        id: ndk
-        with:
-          ndk-version: r27b
+      - name: Install Android NDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build
+          # ubuntu runners already ship the SDK command line tools
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.0.12077973" >/dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973" >> "$GITHUB_ENV"
 
       - name: Build libgrannymod.so
-        env:
-          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           cmake -S loader -B loader/build \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
@@ -56,6 +67,9 @@ jobs:
   apk:
     name: modded granny apk
     needs: loader
+    # Only when the shipped base + split APKs are supplied; they are not
+    # committed here (see README "Legal").
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,12 +85,15 @@ jobs:
           name: loader-so
           path: loader/build
 
-      - name: Restore base + split APKs from LFS
+      - name: Stage the shipped APKs
+        env:
+          BASE_URL: ${{ inputs.base_url }}
+          SPLIT_URL: ${{ inputs.split_url }}
         run: |
-          git lfs install
           mkdir -p base
-          test -f base/granny-base.apk || { echo "base/granny-base.apk missing" >&2; exit 1; }
-          test -f base/granny-arm64.apk || { echo "base/granny-arm64.apk missing" >&2; exit 1; }
+          test -n "$BASE_URL" && test -n "$SPLIT_URL" || { echo "base_url/split_url required" >&2; exit 1; }
+          curl -fsSL "$BASE_URL"  -o base/granny-base.apk
+          curl -fsSL "$SPLIT_URL" -o base/granny-arm64.apk
 
       - name: Build
         run: |
