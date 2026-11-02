@@ -26,4 +26,4 @@ target_compile_definitions(grannymod PRIVATE LUA_USE_POSIX)
 target_compile_options(grannymod PRIVATE -O2 -fvisibility=hidden -Wall)
 # libil2cpp is dlopen'd at runtime, never linked, so the APK keeps loading
 # order under the game's control.
-target_link_libraries(grannymod log dl)
+target_link_libraries(grannymod log dl m)

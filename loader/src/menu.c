@@ -24,6 +24,7 @@
  * a level.
  */
 #include "gm.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -47,6 +48,7 @@ static bool s_browser_open;
 
 /* Defined below; used by gm_menu_install. */
 static void log_screen(void);
+static bool read_anchored(Il2CppObject *go, float *x, float *y);
 static void log_pos(Il2CppObject *go, const char *tag);
 static bool add_text_label(Il2CppObject *parentGo, const char *want);
 
@@ -335,6 +337,25 @@ static void log_pos(Il2CppObject *go, const char *tag) {
         GM_LOGW("%s: could not read the boxed Vector3", tag);
 }
 
+/* Read a RectTransform's anchoredPosition (boxed Vector2 = two floats after the
+ * 16-byte object header). */
+static bool read_anchored(Il2CppObject *go, float *x, float *y) {
+    gmi_t *a = A2();
+    Il2CppObject *t = transform_of(go);
+    if (!t)
+        return false;
+    Il2CppClass *rt = gm_class(NULL, "UnityEngine", "RectTransform");
+    if (!rt)
+        return false;
+    Il2CppMethodInfo *ga = a->class_get_method_from_name(rt, "get_anchoredPosition", 0);
+    if (!ga)
+        return false;
+    Il2CppObject *box = invoke0(ga, t);
+    if (!box)
+        return false;
+    return gm_get_float(box, "x", x) && gm_get_float(box, "y", y);
+}
+
 /* ---- label from a real text element ----------------------------------- */
 
 /*
@@ -434,9 +455,25 @@ bool gm_menu_install(void) {
     if (setname)
         invoke1(setname, mods, a->string_new("ModsButton"));
 
+    /* Live geometry: read the real buttons' anchored positions and derive the
+     * row pitch, instead of trusting offline scene numbers. */
+    float px = 0, py = 0, mx = 0, my = 0, qx = 0, qy = 0;
+    read_anchored(s_play, &px, &py);
+    Il2CppObject *more = gm_find_object("MoreGamesButton");
+    Il2CppObject *quit = gm_find_object("QuitButton");
+    if (more)
+        read_anchored(more, &mx, &my);
+    if (quit)
+        read_anchored(quit, &qx, &qy);
+    float pitch = 67.2f;
+    if (more && quit && fabsf(my - qy) > 1.0f)
+        pitch = fabsf(my - qy);
+    GM_LOGI("live geometry: play=(%.1f,%.1f) more=(%.1f,%.1f) quit=(%.1f,%.1f) pitch=%.1f", px, py,
+            mx, my, qx, qy, pitch);
+
     Il2CppObject *t = transform_of(mods);
     if (t)
-        move_anchored(t, MENU_X, MODS_Y);
+        move_anchored(t, px, py - pitch);
 
     dump_ui();
     if (!add_text_label(mods, "Mods") && !label_clone(mods, "Mods"))
@@ -445,6 +482,9 @@ bool gm_menu_install(void) {
     log_screen();
     log_pos(mods, "ModsButton");
     log_pos(s_play, "PlayButton");
+    float ax = 0, ay = 0;
+    read_anchored(mods, &ax, &ay);
+    GM_LOGI("ModsButton anchoredPosition is now (%.1f, %.1f)", ax, ay);
 
     GM_LOGI("Mods button cloned from PlayButton at (%.1f, %.1f)", MENU_X, MODS_Y);
     return true;
