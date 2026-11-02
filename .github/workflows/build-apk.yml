@@ -29,10 +29,28 @@ jobs:
       - name: Vendor Lua
         run: |
           mkdir -p loader/vendor
-          curl -fsSL "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz" -o lua.tgz
+          # lua.org times out occasionally (curl exit 28), which is not a reason
+          # to fail a build; retry, then fall back to the GitHub mirror.
+          ok=0
+          for url in \
+            "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz" \
+            "https://github.com/lua/lua/archive/refs/tags/v${LUA_VERSION}.tar.gz"; do
+            for try in 1 2 3; do
+              if curl -fsSL --retry 2 --connect-timeout 20 -m 180 "$url" -o lua.tgz; then
+                ok=1; echo "fetched $url"; break
+              fi
+              echo "attempt $try failed for $url"
+            done
+            [ "$ok" = 1 ] && break
+          done
+          test "$ok" = 1 || { echo "could not fetch Lua" >&2; exit 1; }
           tar xzf lua.tgz
-          cp -r "lua-${LUA_VERSION}/src" loader/vendor/lua
+          srcdir="lua-${LUA_VERSION}/src"
+          [ -d "$srcdir" ] || srcdir="$(find . -maxdepth 2 -type d -name src -path '*lua*' | head -1)"
+          cp -r "$srcdir" loader/vendor/lua
+          # lua.h and friends must be flat for the CMake source list
           test -f loader/vendor/lua/lapi.c
+          test -f loader/vendor/lua/lua.h
 
       - name: Host tests
         run: |
