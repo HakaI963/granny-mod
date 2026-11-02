@@ -353,14 +353,27 @@ static void __attribute__((constructor)) gm_ctor(void) {
         GM_LOGE("could not start bind thread; falling back to pump-driven bind");
 }
 
+/* Binding is now reachable from two places - the bind thread and
+ * hook_il2cpp_init on the Unity main thread - so it must be single-shot. Without
+ * this, the second entrant would run patch_method again, read the detour that
+ * the first pass installed as the "original" body, and every subsequent call
+ * would recurse into itself until the stack died. */
+static atomic_flag g_binding = ATOMIC_FLAG_INIT;
+
 bool gm_try_bind(void) {
     if (atomic_load(&g_ready))
         return true;
+    if (atomic_flag_test_and_set(&g_binding)) {
+        /* another thread is mid-bind; do not interleave */
+        return false;
+    }
     void *h = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
     if (!h)
         h = dlopen("libil2cpp.so", RTLD_NOW); /* already a DT_NEEDED of the app */
-    if (!h)
+    if (!h) {
+        atomic_flag_clear(&g_binding);
         return false;
+    }
 
     if (!g.domain_get)
         g.domain_get = dlsym(h, "il2cpp_domain_get");
@@ -411,11 +424,14 @@ bool gm_try_bind(void) {
     for (unsigned i = 0; i < sizeof need / sizeof *need; i++)
         if (!need[i]) {
             GM_LOGE("missing il2cpp export #%u", i);
+            atomic_flag_clear(&g_binding);
             return false;
         }
 
-    if (!gm_resolve_domain())
+    if (!gm_resolve_domain()) {
+        atomic_flag_clear(&g_binding);
         return false;
+    }
 
     gm_map_il2cpp();
 

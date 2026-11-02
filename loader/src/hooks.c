@@ -51,6 +51,10 @@ static bool patch_method(Il2CppClass *c, const char *mname, int argc, void *deto
     }
     void **slot = (void **)m;
     void *cur = *slot;
+    if (cur == detour) {
+        GM_LOGW("%s.%s already hooked; leaving it alone", a->class_get_name(c), mname);
+        return false;
+    }
     if (!cur) {
         GM_LOGW("%s.%s has a null methodPointer (abstract or body-less)", a->class_get_name(c), mname);
         return false;
