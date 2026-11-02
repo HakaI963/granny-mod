@@ -480,8 +480,23 @@ bool gm_try_bind(void) {
     GM_LOGI("bound: %zu assemblies, main thread pump arming", g.nasms);
 
     gm_hooks_install();
-    /* disable ads/IAP after hooks so the very first ad request is already gone */
-    gm_monetisation_disable();
+
+    /*
+     * The ad/IAP neutralisation pass is deliberately NOT run here. On device it
+     * took the game down on the UnityMain thread during binding:
+
+         #00 libc  __memset_aarch64+140
+         #05 libgrannymod.so  void_method+76
+         #06 libgrannymod.so  gm_monetisation_disable+76
+       signal 11 (SIGSEGV), code 2 (SEGV_ACCERR)
+
+     * i.e. il2cpp itself faulted writing into a read-only page while resolving
+     * method arrays for the ad-SDK class names. Hooks for StartNewDay/Button
+     * resolved fine, so it is specific to those classes, not to the mechanism.
+     * Ads are secondary; a loader that crashes the game is not. gm_monetisation_
+     * disable() is now invoked only after the UI is up (see gm_pump_main) and only
+     * once, and void_method refuses any pointer outside libil2cpp's image.
+     */
     return true;
 }
 
@@ -492,7 +507,10 @@ void gm_pump_main(void) {
     gm_drain();
     gm_mods_tick();
     if (!atomic_load(&g_ui_done)) {
-        if (gm_menu_install())
+        if (gm_menu_install()) {
             atomic_store(&g_ui_done, true);
+            /* only now, with the game provably running, try the ad/IAP pass */
+            gm_monetisation_disable();
+        }
     }
 }

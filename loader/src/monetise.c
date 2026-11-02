@@ -47,6 +47,13 @@ static bool void_method(const char *cls, const char *method, int argc) {
     void **slot = (void **)m;
     if (*slot == NULL || *slot == (void *)gm_stub_return)
         return false; /* already neutralised, or a body-less declaration */
+    /* Same guard patch_method() uses: only overwrite a body we can see lives in
+     * libil2cpp.so. Anything else means our layout assumption is wrong. */
+    if (!gm_il2cpp_contains(*slot)) {
+        GM_LOGW("monetisation: %s.%s pointer %p is outside libil2cpp.so; skipping", cls, method,
+                *slot);
+        return false;
+    }
     long ps = sysconf(_SC_PAGESIZE);
     uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(ps - 1);
     if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0)
