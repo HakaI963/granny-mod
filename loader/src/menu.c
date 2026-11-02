@@ -471,9 +471,36 @@ bool gm_menu_install(void) {
     GM_LOGI("live geometry: play=(%.1f,%.1f) more=(%.1f,%.1f) quit=(%.1f,%.1f) pitch=%.1f", px, py,
             mx, my, qx, qy, pitch);
 
+    /*
+     * The clone is created at the scene root, which is why its world position
+     * equalled its anchoredPosition exactly while PlayButton's did not: a
+     * RectTransform that is not under the Canvas is not laid out or drawn by
+     * UGUI at all, so the button existed in the hierarchy but could never be
+     * seen. Parent it to PlayButton's own parent (the MenuButtons container the
+     * tree dump showed) before positioning.
+     */
+    Il2CppObject *pt = transform_of(s_play);
+    Il2CppMethodInfo *getparent = method("UnityEngine", "Transform", "get_parent", 0);
+    Il2CppObject *menu = pt && getparent ? invoke0(getparent, pt) : NULL;
     Il2CppObject *t = transform_of(mods);
-    if (t)
+    Il2CppMethodInfo *setparent = method("UnityEngine", "Transform", "SetParent", 1);
+    if (menu && t && setparent) {
+        invoke1(setparent, t, menu);
+        char pn[128] = {0};
+        Il2CppObject *pg = go_of(menu);
+        if (pg)
+            name_of(pg, pn, sizeof pn);
+        GM_LOGI("reparented ModsButton under '%s'", pn);
+    } else {
+        GM_LOGE("could not reparent the clone (menu=%p t=%p SetParent=%p)", (void *)menu, (void *)t,
+                (void *)setparent);
+    }
+    if (t) {
         move_anchored(t, px, py - pitch);
+        Il2CppMethodInfo *last = method("UnityEngine", "Transform", "SetAsLastSibling", 0);
+        if (last)
+            invoke0(last, t); /* draw above the container's other children */
+    }
 
     dump_ui();
     if (!add_text_label(mods, "Mods") && !label_clone(mods, "Mods"))
