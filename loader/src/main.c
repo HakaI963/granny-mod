@@ -25,6 +25,8 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/mman.h>
 #include <android/log.h>
 
 #include "gm.h"
@@ -149,6 +151,146 @@ static void gm_map_il2cpp(void) {
     GM_LOGI("libil2cpp.so mapped at 0x%lx, span 0x%zx", (unsigned long)w.base, w.span);
 }
 
+/* ---- GOT interception -------------------------------------------------
+ *
+ * libunity/libmain import dlsym (R_AARCH64_JUMP_SLOT), and they resolve every
+ * il2cpp entry point through it. Patching their dlsym GOT slot lets us wrap
+ * il2cpp_init itself, which gives one deterministic fact: the runtime is
+ * initialised. That matters because calling il2cpp_domain_get() *before*
+ * il2cpp_init() faults inside il2cpp - observed as
+ *   #02 libil2cpp.so+0x1382700  (body of the il2cpp_domain_get thunk)
+ *   #03 libgrannymod.so gm_try_bind
+ *   #04 libgrannymod.so gm_bind_thread
+ * i.e. a SIGSEGV we caused by probing too early, not a game bug.
+ */
+static atomic_bool g_init_done;
+
+typedef void *(*dlsym_t)(void *, const char *);
+typedef void *(*il2cpp_init_t)(const char *);
+static dlsym_t real_dlsym;
+static il2cpp_init_t real_il2cpp_init;
+
+static void *hook_il2cpp_init(const char *domain_name) {
+    void *r = real_il2cpp_init ? real_il2cpp_init(domain_name) : NULL;
+    atomic_store(&g_init_done, true);
+    GM_LOGI("il2cpp_init returned (domain=%p, name=%s)", r, domain_name ? domain_name : "?");
+    /* We are on the Unity main thread here, and only metadata lookups plus a
+     * pointer swap follow, so binding now is both safe and early. */
+    if (!gm_try_bind())
+        GM_LOGW("bind deferred: assemblies not visible yet at il2cpp_init return");
+    return r;
+}
+
+static void *hook_dlsym(void *h, const char *name) {
+    void *r = real_dlsym ? real_dlsym(h, name) : NULL;
+    if (name && r && !real_il2cpp_init && !strcmp(name, "il2cpp_init")) {
+        real_il2cpp_init = (il2cpp_init_t)r;
+        GM_LOGI("intercepted dlsym(il2cpp_init) at %p", r);
+        return (void *)hook_il2cpp_init;
+    }
+    return r;
+}
+
+/* One GOT slot we are looking for in one loaded library. */
+typedef struct {
+    const char *leaf;
+    const char *sym;
+    void *newval;
+    void **old;
+    bool hit;
+} got_req_t;
+
+/*
+ * Rewrite a JUMP_SLOT/GLOB_DAT relocation in an already-loaded shared object.
+ * Only the dynamic table is needed, which is present in the mapped image, so
+ * this works on stripped shipping libraries.
+ */
+static int got_patch_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    got_req_t *r = (got_req_t *)data;
+    const char *nm = info->dlpi_name;
+    if (!nm)
+        return 0;
+    const char *slash = strrchr(nm, '/');
+    nm = slash ? slash + 1 : nm;
+    if (strcmp(nm, r->leaf) != 0)
+        return 0;
+
+    uintptr_t bias = (uintptr_t)info->dlpi_addr;
+    const Elf64_Dyn *dyn = NULL;
+    for (int i = 0; i < info->dlpi_phnum; i++)
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+            dyn = (const Elf64_Dyn *)(bias + info->dlpi_phdr[i].p_vaddr);
+            break;
+        }
+    if (!dyn)
+        return 1;
+
+    const char *strtab = NULL;
+    const Elf64_Sym *symtab = NULL;
+    const Elf64_Rela *pltrel = NULL, *dynrel = NULL;
+    size_t pltrelsz = 0, dynrelsz = 0;
+    for (const Elf64_Dyn *d = dyn; d->d_tag != DT_NULL; d++) {
+        switch (d->d_tag) {
+        case DT_STRTAB:  strtab  = (const char *)(uintptr_t)d->d_un.d_ptr; break;
+        case DT_SYMTAB:  symtab  = (const Elf64_Sym *)(uintptr_t)d->d_un.d_ptr; break;
+        case DT_JMPREL:  pltrel  = (const Elf64_Rela *)(uintptr_t)d->d_un.d_ptr; break;
+        case DT_PLTRELSZ: pltrelsz = (size_t)d->d_un.d_val; break;
+        case DT_RELA:    dynrel  = (const Elf64_Rela *)(uintptr_t)d->d_un.d_ptr; break;
+        case DT_RELASZ:  dynrelsz = (size_t)d->d_un.d_val; break;
+        default: break;
+        }
+    }
+    if (!strtab || !symtab)
+        return 1;
+    strtab += bias;
+    symtab += bias;
+
+    const Elf64_Rela *rels[2] = {pltrel, dynrel};
+    size_t reln[2] = {pltrelsz, dynrelsz};
+    for (int pass = 0; pass < 2; pass++) {
+        if (!rels[pass])
+            continue;
+        const Elf64_Rela *rel = (const Elf64_Rela *)((uintptr_t)rels[pass] + bias);
+        size_t n = reln[pass];
+        for (size_t i = 0; (i + 1) * sizeof(Elf64_Rela) <= n; i++) {
+            const Elf64_Rela *e = &rel[i];
+            unsigned type = (unsigned)ELF64_R_TYPE(e->r_info);
+            if (type != R_AARCH64_JUMP_SLOT && type != R_AARCH64_GLOB_DAT)
+                continue;
+            uint32_t si = (uint32_t)(e->r_info >> 32);
+            const char *rn = strtab + symtab[si].st_name;
+            if (strcmp(rn, r->sym) != 0)
+                continue;
+            void **slot = (void **)(bias + e->r_offset);
+            long ps = sysconf(_SC_PAGESIZE);
+            uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(ps - 1);
+            if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0) {
+                GM_LOGE("mprotect failed for %s GOT", r->leaf);
+                continue;
+            }
+            void *was = *slot;
+            *slot = r->newval;
+            if (r->old && !*r->old)
+                *r->old = was;
+            r->hit = true;
+            GM_LOGI("patched %s GOT for %s at %p (was %p)", r->leaf, r->sym, (void *)slot, was);
+        }
+    }
+    return 1; /* the leaf matched; no other copy of it exists */
+}
+
+static bool gm_got_patch(const char *leaf, const char *sym, void *newval, void **old) {
+    got_req_t req;
+    req.leaf = leaf;
+    req.sym = sym;
+    req.newval = newval;
+    req.old = old;
+    req.hit = false;
+    dl_iterate_phdr(got_patch_cb, &req);
+    return req.hit;
+}
+
 bool gm_il2cpp_contains(const void *p) {
     if (!s_il2cpp_span)
         return false;
@@ -166,10 +308,36 @@ bool gm_il2cpp_contains(const void *p) {
  */
 static void *gm_bind_thread(void *arg) {
     (void)arg;
-    for (int i = 0; i < 900; i++) {
+    prctl(PR_SET_NAME, "gm-bind", 0, 0, 0);
+    /*
+     * Step 1: get the dlsym interception installed while libunity/libmain are
+     * still being mapped, so il2cpp_init is wrapped before it is ever called.
+     * Step 2: only touch il2cpp once that has actually happened. Probing
+     * earlier is what produced the SIGSEGV inside il2cpp_domain_get.
+     */
+    bool hooked = false;
+    for (int i = 0; i < 3000 && !atomic_load(&g_init_done); i++) {
+        if (!hooked) {
+            /* The saved original *is* the real dlsym, so no second lookup is
+             * needed (and dlsym(RTLD_DEFAULT,"dlsym") would just find our own
+             * libdl entry, not the resolved slot). */
+            bool a = gm_got_patch("libunity.so", "dlsym", (void *)hook_dlsym, (void **)&real_dlsym);
+            bool b = gm_got_patch("libmain.so", "dlsym", (void *)hook_dlsym, (void **)&real_dlsym);
+            if (a || b) {
+                hooked = true;
+                GM_LOGI("dlsym intercepted in %s%s", a ? "libunity" : "", b ? " libmain" : "");
+            }
+        }
+        usleep(5 * 1000);
+    }
+    if (!atomic_load(&g_init_done)) {
+        GM_LOGE("il2cpp_init was never intercepted; not probing (probing early crashes the game)");
+        return NULL;
+    }
+    for (int i = 0; i < 400; i++) {
         if (gm_try_bind())
             return NULL;
-        usleep(100 * 1000);
+        usleep(50 * 1000);
     }
     GM_LOGE("bind gave up: il2cpp domain never became available");
     return NULL;
