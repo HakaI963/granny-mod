@@ -568,9 +568,13 @@ bool gm_try_bind(void) {
 }
 
 /* Called from the hooked MonoBehaviour.Update on the Unity main thread. */
+static unsigned s_pump_count;
+
 void gm_pump_main(void) {
     if (!atomic_load(&g_ready) && !gm_try_bind())
         return;
+    if (s_pump_count++ == 0)
+        GM_LOGI("pump: first tick on the Unity main thread");
     gm_drain();
     gm_mods_tick();
     if (!atomic_load(&g_ui_done)) {

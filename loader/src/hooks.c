@@ -83,22 +83,33 @@ static bool patch_method(Il2CppClass *c, const char *mname, int argc, void *deto
  * mods from ticking, so each candidate is tried in turn and the winner is
  * logged.
  */
-static const char *k_pump_candidates[] = {
-    "StartNewDay",
-    "FPSControllerNEW",
-    "MenuButtons",
-    "DisplayText",
-    "PauseMenu",
+/* Namespace + class, in preference order.
+ *
+ * EventSystem.Update is first on purpose: UnityEngine.EventSystems.EventSystem
+ * ticks every frame in ANY scene that has UI, which includes the main menu.
+ * StartNewDay is Granny's own day manager and was the original choice, but it
+ * is not guaranteed to run on the menu screen, and a pump that only ticks during
+ * gameplay cannot install a menu button. */
+static const struct { const char *ns; const char *cls; } k_pump_candidates[] = {
+    { "UnityEngine.EventSystems", "EventSystem" },
+    { "UnityEngine.UI", "Button" },
+    { "", "StartNewDay" },
+    { "", "FPSControllerNEW" },
+    { "", "MenuButtons" },
 };
 
 void gm_hooks_install(void) {
     bool pumped = false;
     for (unsigned i = 0; i < sizeof k_pump_candidates / sizeof *k_pump_candidates && !pumped; i++) {
-        Il2CppClass *c = gm_class(NULL, "", k_pump_candidates[i]);
-        if (!c)
+        Il2CppClass *c = gm_class(NULL, k_pump_candidates[i].ns, k_pump_candidates[i].cls);
+        if (!c) {
+            GM_LOGW("pump candidate %s.%s not present", k_pump_candidates[i].ns,
+                    k_pump_candidates[i].cls);
             continue;
+        }
         if (patch_method(c, "Update", 0, (void *)det_update, &s_orig_update)) {
-            GM_LOGI("pump armed on %s.Update", k_pump_candidates[i]);
+            GM_LOGI("pump armed on %s.%s.Update", k_pump_candidates[i].ns,
+                    k_pump_candidates[i].cls);
             pumped = true;
         }
     }

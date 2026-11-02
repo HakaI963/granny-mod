@@ -222,14 +222,22 @@ static bool label_clone(Il2CppObject *go, const char *want) {
 
 /* ---- public ------------------------------------------------------------ */
 
+static unsigned s_attempts;
+
 bool gm_menu_install(void) {
     gmi_t *a = A2();
     if (!s_play) {
+        if (++s_attempts % 30 != 1)
+            return false; /* GameObject.Find is a managed call: ~2 per second is plenty */
         Il2CppObject *go = gm_find_object("PlayButton");
         if (!go)
             go = gm_find_object("Canvas/MenuButtons/PlayButton");
-        if (!go)
-            return false; /* menu scene not loaded yet: retried every pump */
+        if (!go) {
+            /* Rate-limited so the log says whether the pump ticks at all and
+             * whether the menu object is actually named PlayButton. */
+            GM_LOGI("menu install: PlayButton not found yet (attempt %u)", s_attempts);
+            return false;
+        }
         s_play = go;
         char n[64];
         if (name_of(s_play, n, sizeof n))
