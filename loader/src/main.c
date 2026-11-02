@@ -18,7 +18,10 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <elf.h>
+#include <link.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -92,15 +95,76 @@ static bool gm_resolve_domain(void) {
     return g.asms != NULL;
 }
 
+/*
+ * Range of libil2cpp.so's image in memory. Managed method bodies live inside
+ * it, so any MethodInfo.methodPointer we are about to overwrite must fall in
+ * this range - that is what proves the offset assumption is right before we
+ * patch, rather than after the game dies in a signal handler.
+ */
+static uintptr_t s_il2cpp_base;
+static size_t s_il2cpp_span;
+
+static void gm_map_il2cpp(void *handle) {
+    struct link_map *map = NULL;
+    if (dlinfo(handle, RTLD_DL_LINKMAP, &map) != 0 || !map || !map->l_addr) {
+        GM_LOGE("could not map libil2cpp.so");
+        return;
+    }
+    s_il2cpp_base = (uintptr_t)map->l_addr;
+    const ElfW(Ehdr) *eh = (const ElfW(Ehdr) *)s_il2cpp_base;
+    if (memcmp(eh->e_ident, ELFMAG, SELFMAG) != 0) {
+        GM_LOGE("libil2cpp base does not hold an ELF header");
+        s_il2cpp_base = 0;
+        return;
+    }
+    size_t highest = 0;
+    for (int i = 0; i < eh->e_phnum; i++) {
+        const ElfW(Phdr) *ph = (const ElfW(Phdr) *)(s_il2cpp_base + eh->e_phoff +
+                                                    (size_t)i * eh->e_phentsize);
+        if (ph->p_type == PT_LOAD) {
+            size_t end = ph->p_vaddr + ph->p_memsz;
+            if (end > highest)
+                highest = end;
+        }
+    }
+    s_il2cpp_span = highest;
+    GM_LOGI("libil2cpp.so at 0x%lx span 0x%zx", (unsigned long)s_il2cpp_base, s_il2cpp_span);
+}
+
+bool gm_il2cpp_contains(const void *p) {
+    if (!s_il2cpp_span)
+        return false;
+    uintptr_t v = (uintptr_t)p;
+    return v >= s_il2cpp_base && v - s_il2cpp_base < s_il2cpp_span;
+}
+
+/*
+ * Binding cannot be driven from the pump: the pump only exists once a hook is
+ * installed, and installing a hook needs the binding - so driving bind from the
+ * pump is a deadlock (that is why a previous build logged "loader resident" and
+ * then nothing forever). A monitor thread polls until the domain is live.
+ * Only metadata lookups happen here; every managed *invocation* stays on the
+ * Unity main thread inside gm_pump_main().
+ */
+static void *gm_bind_thread(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 900; i++) {
+        if (gm_try_bind())
+            return NULL;
+        usleep(100 * 1000);
+    }
+    GM_LOGE("bind gave up: il2cpp domain never became available");
+    return NULL;
+}
+
 static void __attribute__((constructor)) gm_ctor(void) {
-    /*
-     * libil2cpp.so may not be loaded yet when this runs: UnityPlayer loads it
-     * from its own static init. dlopen with RTLD_NOLOAD|RTLD_NOW first probes
-     * it without forcing an early load that would race with the VM bootstrap;
-     * if it is not resident we defer, and gm_try_bind() retries from the pump.
-     */
     atomic_store(&g_ready, false);
-    GM_LOGI("loader resident (pid-independent bind deferred)");
+    GM_LOGI("loader resident, monitor thread starting");
+    pthread_t th;
+    if (pthread_create(&th, NULL, gm_bind_thread, NULL) == 0)
+        pthread_detach(th);
+    else
+        GM_LOGE("could not start bind thread; falling back to pump-driven bind");
 }
 
 bool gm_try_bind(void) {
@@ -167,11 +231,20 @@ bool gm_try_bind(void) {
     if (!gm_resolve_domain())
         return false;
 
+    gm_map_il2cpp(h);
+
+    /*
+     * g_ready must be set *before* the hook/monetisation passes: gm_class()
+     * refuses to resolve anything until the runtime is declared ready, and both
+     * of those passes resolve classes. Setting it afterwards made every lookup
+     * return NULL, so no hook was ever installed.
+     */
+    atomic_store(&g_ready, true);
+    GM_LOGI("bound: %d assemblies, main thread pump arming", g.nasms);
+
     gm_hooks_install();
     /* disable ads/IAP after hooks so the very first ad request is already gone */
     gm_monetisation_disable();
-    atomic_store(&g_ready, true);
-    GM_LOGI("bound: %d assemblies, main thread pump armed", g.nasms);
     return true;
 }
 

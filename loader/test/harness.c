@@ -22,7 +22,7 @@ bool gm_try_bind(void) { return true; }
 void gm_pump_main(void) {}
 void gm_hooks_install(void) {}
 bool gm_menu_install(void) { return true; }
-void gm_button_click(void *b, void *e) { (void)b; (void)e; }
+bool gm_button_click(void *b, void *e) { (void)b; (void)e; return false; }
 Il2CppClass *gm_class(const char *a, const char *n, const char *c) {
     (void)a; (void)n; (void)c;
     return (Il2CppClass *)0x1;

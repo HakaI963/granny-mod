@@ -20,6 +20,7 @@ import sys
 import zipfile
 
 import axml_rename
+import arsc_rename
 
 OLD = "com.dvloper.granny"
 DEX_MEMBER = "classes3.dex"
@@ -51,6 +52,8 @@ def rebuild(src: str, split: str, dex: str, module: str, newpkg: str, out: str) 
             # re-added below from their patched copies, so skip the originals.
             if _is_signature(name):
                 continue
+            if name == "resources.arsc" and newpkg and newpkg != OLD:
+                continue
             if name == "AndroidManifest.xml" or (a_wants_dex and name == DEX_MEMBER):
                 continue
             data = zin.read(name)
@@ -65,10 +68,24 @@ def rebuild(src: str, split: str, dex: str, module: str, newpkg: str, out: str) 
         tmp = out + ".axml"
         with open(tmp, "wb") as fh:
             fh.write(manifest)
-        if newpkg and newpkg != OLD:
-            axml_rename.patch_file(tmp, OLD, newpkg)
+        # Always run: with newpkg == OLD this is a no-rename pass that still
+        # strips requiredSplitTypes/splitTypes.
+        axml_rename.patch_file(tmp, OLD, newpkg or OLD)
         zout.write(tmp, "AndroidManifest.xml", zipfile.ZIP_STORED)
         os.remove(tmp)
+
+        # resources.arsc with the package name rewritten to match the manifest.
+        # Unity resolves getIdentifier(name, type, getPackageName()) against the
+        # arsc package string, so leaving it stale makes getString() throw
+        # Resources$NotFoundException: String resource ID #0x0 at startup.
+        if newpkg and newpkg != OLD:
+            arsc = zin.read("resources.arsc")
+            tmpa = out + ".arsc"
+            with open(tmpa, "wb") as fh:
+                fh.write(arsc)
+            arsc_rename.patch_file(tmpa, OLD, newpkg)
+            zout.write(tmpa, "resources.arsc", zipfile.ZIP_STORED)
+            os.remove(tmpa)
 
         # patched dex
         zout.write(dex, DEX_MEMBER, zipfile.ZIP_STORED)

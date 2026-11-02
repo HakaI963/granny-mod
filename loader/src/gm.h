@@ -58,6 +58,8 @@ typedef struct {
 bool gm_ready(void);
 void *gm_api(void);
 bool gm_try_bind(void);
+/* true when p falls inside libil2cpp.so's mapped image */
+bool gm_il2cpp_contains(const void *p);
 void gm_pump_main(void);
 void gm_post(void (*)(void *), void *);
 
@@ -69,7 +71,9 @@ void gm_hooks_install(void);
 
 /* menu.c — the Mods button and in-app mod browser */
 bool gm_menu_install(void);
-void gm_button_click(void *button, void *pointer_data);
+/* returns true when the click belonged to a Mods widget and the game's own
+ * Button handler must not run (a Mods clone would otherwise start a level) */
+bool gm_button_click(void *button, void *pointer_data);
 
 /* mods.c — mod discovery, enable/disable, application */
 void gm_mods_tick(void);

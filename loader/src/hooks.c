@@ -1,52 +1,33 @@
 /*
- * Function interception.
+ * Managed method-pointer detours.
  *
- * Two mechanisms, because they solve different problems:
+ * il2cpp invokes managed code through MethodInfo.methodPointer, the first field
+ * of the Il2CppMethodInfo the reflection API hands back. Swapping that single
+ * word redirects every caller in the program without touching a byte of code,
+ * which is what makes this survivable across Granny builds: no absolute code
+ * addresses are baked in.
  *
- *  1. GOT hooking of libil2cpp.so's own relocations — used for calls il2cpp
- *     makes *outward* (e.g. into libunity.so). Not what we mostly need.
- *  2. Inline trampoline on exported il2cpp entry points, plus - the one that
- *     actually matters here - detouring managed method *pointers* that live in
- *     the Il2CppClass method array. il2cpp invokes managed code through
- *     klass->methods[i]->methodPointer, so swapping that pointer redirects the
- *     call for every caller in the program without touching any code bytes.
- *     That is how we pump the main thread and how we catch Button clicks.
+ * No delegate creation is possible here - il2cpp_delegate_create is NOT exported
+ * by this build - which is why the Mods button cannot be wired through
+ * UnityEvent and clicks are caught by detouring UnityEngine.UI.Button's own
+ * handler instead.
  *
- * No delegate creation is possible: il2cpp_delegate_create is not exported by
- * this build (checked), which is why the Mods button cannot be wired through
- * UnityEvent and must instead intercept UnityEngine.UI.Button's own handler.
+ * Before overwriting a slot we require the existing value to lie inside
+ * libil2cpp.so's image (gm_il2cpp_contains). A methodPointer outside the module
+ * means our layout assumption is wrong for this runtime, and writing to it
+ * would crash the game at the first call; refusing and logging is the safe
+ * outcome.
  */
 #include "gm.h"
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
-typedef struct {
-    const char *cls_ns;
-    const char *cls;
-    const char *method;
-    int argc;
-    void *detour;
-    void **original;
-} hook_req_t;
-
-/*
- * Managed methods we detour. Every entry was read out of the shipped
- * global-metadata.dat, so the names are the real ones, not guesses:
- *   StartNewDay.Update      (type 4490, methods 32373+12) -> main-thread pump
- *   Button.OnPointerClick   -> Mods / More Games / Quit dispatch
- */
-static const hook_req_t k_hooks[] = {
-    {NULL, "StartNewDay", "Update", 0, NULL, NULL},
-    {NULL, "Button", "OnPointerClick", 1, NULL, NULL},
-};
+typedef Il2CppObject *(*fn_inst0)(Il2CppObject *);
+typedef Il2CppObject *(*fn_inst1)(Il2CppObject *, void *, Il2CppObject **);
 
 static void *s_orig_update;
 static void *s_orig_click;
-
-/* Trampolines: same signature as the managed method's native shim. */
-typedef Il2CppObject *(*fn_inst0)(Il2CppObject *);
-typedef Il2CppObject *(*fn_inst1)(Il2CppObject *, void *, Il2CppObject **);
 
 static Il2CppObject *det_update(Il2CppObject *self) {
     gm_pump_main();
@@ -55,7 +36,8 @@ static Il2CppObject *det_update(Il2CppObject *self) {
 }
 
 static Il2CppObject *det_click(Il2CppObject *self, void *evt, Il2CppObject **exc) {
-    gm_button_click(self, evt);
+    if (gm_button_click(self, evt))
+        return NULL; /* consumed: never reach PlayButton's real handler */
     fn_inst1 o = (fn_inst1)s_orig_click;
     return o ? o(self, evt, exc) : NULL;
 }
@@ -64,35 +46,65 @@ static bool patch_method(Il2CppClass *c, const char *mname, int argc, void *deto
     gmi_t *a = A2();
     Il2CppMethodInfo *m = a->class_get_method_from_name(c, mname, argc);
     if (!m) {
-        GM_LOGE("method %s.%s/%d not found", a->class_get_name(c), mname, argc);
+        GM_LOGW("no %s.%s/%d", a->class_get_name(c), mname, argc);
         return false;
     }
-    /* methodPointer is the first field of Il2CppMethodInfo in every v31 build
-     * we have inspected; it is what il2cpp_call_impl dereferences. */
     void **slot = (void **)m;
-    *out_orig = *slot;
-    long ps = (long)sysconf(_SC_PAGESIZE);
-    uintptr_t page = (uintptr_t)slot & ~(ps - 1);
-    if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0) {
-        GM_LOGE("mprotect failed for %s", mname);
+    void *cur = *slot;
+    if (!cur) {
+        GM_LOGW("%s.%s has a null methodPointer (abstract or body-less)", a->class_get_name(c), mname);
         return false;
     }
+    if (!gm_il2cpp_contains(cur)) {
+        GM_LOGE("REFUSING to patch %s.%s: current pointer %p is outside libil2cpp.so - "
+                "methodPointer is not the first field in this runtime",
+                a->class_get_name(c), mname, cur);
+        return false;
+    }
+    long ps = (long)sysconf(_SC_PAGESIZE);
+    uintptr_t page = (uintptr_t)slot & ~(uintptr_t)(ps - 1);
+    if (mprotect((void *)page, (size_t)ps, PROT_READ | PROT_WRITE) != 0) {
+        GM_LOGE("mprotect failed for %s.%s", a->class_get_name(c), mname);
+        return false;
+    }
+    *out_orig = cur;
     *slot = detour;
     mprotect((void *)page, (size_t)ps, PROT_READ);
-    GM_LOGI("hooked %s.%s/%d", a->class_get_name(c), mname, argc);
+    GM_LOGI("hooked %s.%s/%d (body was %p)", a->class_get_name(c), mname, argc, cur);
     return true;
 }
 
+/*
+ * The pump needs a MonoBehaviour whose Update runs in *every* scene, menu
+ * included. StartNewDay is Granny's persistent day manager, but if a build
+ * moves it, betting the whole mod layer on one class name would silently stop
+ * mods from ticking, so each candidate is tried in turn and the winner is
+ * logged.
+ */
+static const char *k_pump_candidates[] = {
+    "StartNewDay",
+    "FPSControllerNEW",
+    "MenuButtons",
+    "DisplayText",
+    "PauseMenu",
+};
+
 void gm_hooks_install(void) {
-    gmi_t *a = A2();
-    Il2CppClass *snd = gm_class(NULL, "", "StartNewDay");
-    if (snd)
-        patch_method(snd, "Update", 0, (void *)det_update, &s_orig_update);
-    else
-        GM_LOGE("StartNewDay missing: mods will not tick");
+    bool pumped = false;
+    for (unsigned i = 0; i < sizeof k_pump_candidates / sizeof *k_pump_candidates && !pumped; i++) {
+        Il2CppClass *c = gm_class(NULL, "", k_pump_candidates[i]);
+        if (!c)
+            continue;
+        if (patch_method(c, "Update", 0, (void *)det_update, &s_orig_update)) {
+            GM_LOGI("pump armed on %s.Update", k_pump_candidates[i]);
+            pumped = true;
+        }
+    }
+    if (!pumped)
+        GM_LOGE("no pump class available: mods will not tick and the menu will not appear");
 
     /* UnityEngine.UI.Button lives in the UnityEngine.UI assembly with a
-     * namespace; look it up the same way the game does. */
+     * namespace; the game resolves it the same way, so try both spellings. */
     Il2CppClass *btn = gm_class(NULL, "UnityEngine.UI", "Button");
     if (!btn)
         btn = gm_class(NULL, "", "Button");
@@ -100,5 +112,4 @@ void gm_hooks_install(void) {
         patch_method(btn, "OnPointerClick", 1, (void *)det_click, &s_orig_click);
     else
         GM_LOGE("UnityEngine.UI.Button missing: menu clicks unavailable");
-    (void)a;
 }

@@ -114,7 +114,7 @@ def patch(data: bytes, old: str, new: str) -> bytes:
         if s == old or s.startswith(old + ".") or s.startswith(old + "-"):
             strings[i] = new + s[len(old):]
             changed += 1
-    if not changed:
+    if not changed and new != old:
         raise SystemExit("no matching strings - nothing renamed")
 
     blob = bytearray()
