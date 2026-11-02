@@ -41,8 +41,15 @@ python3 patch/inject.py \
 # --- 3. align + sign -------------------------------------------------------
 zipalign -p -f 4 "$W/unsigned.apk" "$W/aligned.apk"
 
+# A stable key: regenerating one per build changes the signature, which makes the
+# next install fail with INSTALL_FAILED_UPDATE_INCOMPATIBLE instead of upgrading.
+if [ -z "${KEYSTORE:-}" ] && [ -f mod.keystore ]; then
+  KEYSTORE=mod.keystore
+  KEYPASS=android
+fi
+
 if [ -n "${KEYSTORE:-}" ]; then
-  apksigner sign --ks "$KEYSTORE" --ks-pass "pass:${KEYPASS}" \
+  apksigner sign --ks "$KEYSTORE" --ks-pass "pass:${KEYPASS:-android}" \
     --out granny-modded.apk "$W/aligned.apk"
 else
   keytool -genkeypair -keystore "$W/mod.keystore" -storepass android -keypass android \
