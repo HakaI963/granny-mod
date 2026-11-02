@@ -218,13 +218,35 @@ static int got_patch_cb(struct dl_phdr_info *info, size_t size, void *data) {
 
     uintptr_t bias = (uintptr_t)info->dlpi_addr;
     const Elf64_Dyn *dyn = NULL;
-    for (int i = 0; i < info->dlpi_phnum; i++)
-        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+    uintptr_t span = 0;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC)
             dyn = (const Elf64_Dyn *)(bias + info->dlpi_phdr[i].p_vaddr);
-            break;
+        if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+            uintptr_t end = info->dlpi_phdr[i].p_vaddr + info->dlpi_phdr[i].p_memsz;
+            if (end > span)
+                span = end;
         }
+    }
     if (!dyn)
         return 1;
+
+    /*
+     * Bionic leaves the in-memory .dynamic entries as *file* virtual addresses
+     * rather than rewriting them, so DT_* pointers need the load bias applied -
+     * once, and with uintptr_t arithmetic.
+     *
+     * Proven by the fault address itself: libunity's DT_JMPREL is 0xc9020 and
+     * the crash was "SEGV_MAPERR, fault addr 0xc9028", i.e. reading the first
+     * Rela entry's field through an unbiased pointer.
+     *
+     * Two earlier mistakes are worth recording:
+     *   - `symtab += bias` on an Elf64_Sym* advances by bias*sizeof(Elf64_Sym),
+     *     i.e. bias*24 bytes, which produced the wild 0xb637c10a2b8 fault.
+     *   - removing the bias entirely (the previous commit) produced 0xc9028.
+     * Accept a value as already-absolute only if it genuinely falls inside this
+     * object's mapping, so both linker conventions are safe.
+     */
 
     const char *strtab = NULL;
     const Elf64_Sym *symtab = NULL;
@@ -243,20 +265,22 @@ static int got_patch_cb(struct dl_phdr_info *info, size_t size, void *data) {
     }
     if (!strtab || !symtab)
         return 1;
-    /*
-     * Do NOT bias these. In a loaded ET_DYN image the dynamic linker has
-     * already relocated every DT_* pointer entry, so DT_STRTAB / DT_SYMTAB /
-     * DT_JMPREL / DT_RELA hold absolute addresses. Only an r_offset *inside* a
-     * relocation record is still file-relative. Adding the bias a second time
-     * gave a wild pointer and SIGSEGV at 0xb637c10a2b8 in gm-bind.
-     */
+
+    uintptr_t sv = (uintptr_t)strtab, yv = (uintptr_t)symtab;
+    uintptr_t pv = (uintptr_t)pltrel, rv = (uintptr_t)dynrel;
+    #define RESOLVE(v) (((v) >= bias && (v) - bias < span) ? (v) : ((v) + bias))
+    strtab  = (const char *)RESOLVE(sv);
+    symtab  = (const Elf64_Sym *)RESOLVE(yv);
+    pltrel  = (const Elf64_Rela *)RESOLVE(pv);
+    dynrel  = (const Elf64_Rela *)RESOLVE(rv);
+    #undef RESOLVE
 
     const Elf64_Rela *rels[2] = {pltrel, dynrel};
     size_t reln[2] = {pltrelsz, dynrelsz};
     for (int pass = 0; pass < 2; pass++) {
         if (!rels[pass])
             continue;
-        const Elf64_Rela *rel = rels[pass]; /* already absolute */
+        const Elf64_Rela *rel = rels[pass]; /* resolved above */
         size_t n = reln[pass];
         for (size_t i = 0; (i + 1) * sizeof(Elf64_Rela) <= n; i++) {
             const Elf64_Rela *e = &rel[i];
