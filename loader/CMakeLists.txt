@@ -14,10 +14,10 @@ set(LUA_SRC
     vendor/lua/lutf8lib.c vendor/lua/lvm.c vendor/lua/lzio.c)
 
 if(EXISTS ${CMAKE_CURRENT_LIST_DIR}/vendor/lua/lapi.c)
-  set(SRC src/main.c src/reflect.c src/hooks.c src/menu.c src/mods.c src/scripts.c ${LUA_SRC})
+  set(SRC src/main.c src/reflect.c src/hooks.c src/menu.c src/mods.c src/monetise.c src/scripts.c ${LUA_SRC})
 else()
   message(WARNING "vendor/lua missing: building without script hooks")
-  set(SRC src/main.c src/reflect.c src/hooks.c src/menu.c src/mods.c)
+  set(SRC src/main.c src/reflect.c src/hooks.c src/menu.c src/mods.c src/monetise.c)
 endif()
 
 add_library(grannymod SHARED ${SRC})

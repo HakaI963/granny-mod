@@ -41,6 +41,25 @@ jobs:
               -o /tmp/gmtest loader/src/mods.c loader/test/harness.c
           /tmp/gmtest
 
+      - name: Link check every module
+        run: |
+          # Compiling each .c proves nothing about the CMake source list: a file
+          # left out of it compiles fine and only fails at link time. Link the
+          # whole set as a host shared object first.
+          gcc -shared -fPIC -o /tmp/hostgrannymod.so \
+              -Iloader/src -Iloader/test/shim \
+              $(ls loader/src/*.c | grep -v scripts.c) -lpthread
+          nm -D /tmp/hostgrannymod.so | grep -c "gm_"
+          # and confirm CMakeLists names every source file that exists
+          for f in loader/src/*.c; do
+            b=$(basename "$f")
+            case "$b" in
+              scripts.c) continue ;;
+            esac
+            grep -q "src/$b" loader/CMakeLists.txt || { echo "CMakeLists.txt is missing src/$b" >&2; exit 1; }
+          done
+          echo "all modules are in the build"
+
       - name: Install Android NDK
         run: |
           sudo apt-get update
