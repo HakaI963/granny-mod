@@ -78,7 +78,15 @@ static bool jstring_to_ascii(Il2CppObject *s, char *out, size_t cap) {
     if (st->length < 0)
         return false;
     int n = st->length < (int)cap - 1 ? st->length : (int)cap - 1;
-    const uint16_t *chars = (const uint16_t *)(void *)((char *)st + sizeof(struct il2cpp_string));
+    /*
+     * The first code unit sits at offset 20 (klass 8 + monitor 8 + length 4).
+     * sizeof(struct il2cpp_string) is 24, because the compiler pads the struct to
+     * an 8-byte alignment - using it dropped the first two characters and made
+     * "PlayButton" read back as "ayButton", which would also have broken the
+     * click dispatch that compares this string to "ModsButton".
+     */
+    const uint16_t *chars =
+        (const uint16_t *)(void *)((char *)st + 2 * sizeof(void *) + sizeof(int32_t));
     for (int i = 0; i < n; i++)
         out[i] = (char)chars[i];
     out[n] = 0;
@@ -125,6 +133,62 @@ static void move_anchored(Il2CppObject *transform, float x, float y) {
     void *params[1] = {&v};
     Il2CppObject *exc = NULL;
     a->runtime_invoke(m, transform, params, &exc);
+}
+
+/* ---- hierarchy dump ---------------------------------------------------- */
+
+static Il2CppObject *tr_method(const char *name, int argc) {
+    return (Il2CppObject *)method("UnityEngine", "Transform", name, argc);
+}
+
+static void dump_walk(Il2CppObject *t, int depth, int *budget) {
+    if (!t || *budget <= 0 || depth > 4)
+        return;
+    gmi_t *a = A2();
+    Il2CppObject *kid = NULL;
+    Il2CppMethodInfo *gc = (Il2CppMethodInfo *)tr_method("GetChild", 1);
+    Il2CppMethodInfo *cn = (Il2CppMethodInfo *)tr_method("get_name", 0);
+    char nm[128] = {0};
+    if (cn) {
+        Il2CppObject *so = invoke0(cn, t);
+        jstring_to_ascii(so, nm, sizeof nm);
+    }
+    (*budget)--;
+    char pad[24] = {0};
+    for (int i = 0; i < depth && i < 10; i++)
+        strcat(pad, "  ");
+    GM_LOGI("ui %s%s", pad, nm[0] ? nm : "?");
+    if (!gc)
+        return;
+    for (int i = 0; i < 24 && *budget > 0; i++) {
+        int idx = i;
+        void *p[1] = {&idx};
+        Il2CppObject *ex = NULL;
+        kid = a->runtime_invoke(gc, t, p, &ex);
+        if (!kid)
+            break;
+        dump_walk(kid, depth + 1, budget);
+    }
+}
+
+static void dump_ui(void) {
+    if (!s_play)
+        return;
+    Il2CppObject *t = transform_of(s_play);
+    if (!t)
+        return;
+    Il2CppMethodInfo *parent = (Il2CppMethodInfo *)tr_method("get_parent", 0);
+    Il2CppObject *p = parent ? invoke0(parent, t) : NULL;
+    Il2CppObject *root = t;
+    for (int i = 0; i < 3 && p; i++) {
+        Il2CppObject *q = parent ? invoke0(parent, p) : NULL;
+        if (!q)
+            break;
+        p = q;
+    }
+    int budget = 40;
+    GM_LOGI("ui tree (button's ancestors, depth<=4):");
+    dump_walk(p ? p : root, 0, &budget);
 }
 
 /* ---- cloning ----------------------------------------------------------- */
@@ -259,6 +323,7 @@ bool gm_menu_install(void) {
     if (t)
         move_anchored(t, MENU_X, MODS_Y);
 
+    dump_ui();
     if (!label_clone(mods, "Mods"))
         GM_LOGW("ModsButton has no text child; it will show the inherited label");
 
