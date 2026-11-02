@@ -119,8 +119,14 @@ static const char *j_val(const char *s, double *num, char *str, size_t cap, bool
 
 /* Parse "targets": { "Class.field": value, ... } */
 static bool parse_targets(const char *s, mod_t *m) {
-    s = j_skip(strstr(s, "\"targets\""));
-    if (!s || *s != ':')
+    s = strstr(s, "\"targets\"");
+    if (!s)
+        return false;
+    /* step over the key itself before looking for the colon - doing j_skip on
+     * the quote left *s == '"', so every targets block parsed as empty and mods
+     * loaded with 0 fields */
+    s = j_skip(s + 9);
+    if (*s != ':')
         return false;
     s = j_skip(s + 1);
     if (*s != '{')
@@ -229,47 +235,91 @@ static void scan(void) {
     closedir(d);
 }
 
-/* Apply one mod's field writes by name, against the live objects. */
+/* Apply one mod's field writes by name, against the live objects.
+ *
+ * The scene object that owns each managed class is known from the shipped
+ * scenes, so a target like "EnemyAIGranny.walkSpeed" resolves to: find the
+ * GameObject called Granny, ask it for the EnemyAIGranny component, then write
+ * the field on that component. Writing onto the GameObject itself would corrupt
+ * memory, so every step is checked and a missing class or component is reported
+ * rather than guessed at.
+ *
+ * Every il2cpp entry point is NULL-checked: the host harness runs this code with
+ * an unbound API table, and calling through a NULL pointer is exactly what made
+ * the harness segfault as soon as mod.json targets parsed correctly.
+ */
+struct cls_root { const char *cls; const char *root; };
+static const struct cls_root k_roots[] = {
+    { "EnemyAIGranny", "Granny" },
+    { "FPSControllerNEW", "Player" },
+    { "StartNewDay", "Main Camera" },
+    { "InventoryController", "Player" },
+    { NULL, NULL },
+};
+
+static const char *root_for(const char *cls) {
+    for (int i = 0; k_roots[i].cls; i++)
+        if (!strcmp(k_roots[i].cls, cls))
+            return k_roots[i].root;
+    return NULL;
+}
+
 static void apply_mod(const mod_t *m) {
+    gmi_t *a = A2();
+    if (!a || !a->class_from_name || !a->runtime_invoke)
+        return; /* API not bound yet: nothing can be resolved safely */
     for (int i = 0; i < m->nfields; i++) {
         const field_write_t *fw = &m->fields[i];
         Il2CppClass *c = gm_class(NULL, "", fw->cls);
-        if (!c)
-            c = gm_class(NULL, "Assembly-CSharp", fw->cls);
         if (!c) {
-            GM_LOGW("%s: no class '%s'", m->id, fw->cls);
+            static int warned[GM_MAX_FIELDS];
+            if (!warned[i]) {
+                warned[i] = 1;
+                GM_LOGW("%s: no managed class '%s'", m->id, fw->cls);
+            }
             continue;
         }
         if (fw->is_static) {
             gm_set_static_float(c, fw->field, fw->value);
             continue;
         }
-        /* instance fields need the live component, found through the scene
-         * object that the original game names exactly */
-        const char *root = NULL;
-        if (!strcmp(fw->cls, "EnemyAIGranny"))
-            root = "Granny";
-        else if (!strcmp(fw->cls, "FPSControllerNEW"))
-            root = "Player";
-        else if (!strcmp(fw->cls, "StartNewDay"))
-            root = "Main Camera";
-        if (!root)
+        const char *root = root_for(fw->cls);
+        if (!root) {
             continue;
+        }
         Il2CppObject *go = gm_find_object(root);
         if (!go)
+            continue; /* scene not loaded yet */
+
+        /* GameObject.GetComponent(Type) with an assembly-qualified name. */
+        Il2CppClass *goc = a->object_get_class ? a->object_get_class(go) : NULL;
+        Il2CppMethodInfo *gc = goc && a->class_get_method_from_name
+            ? a->class_get_method_from_name(goc, "GetComponent", 1) : NULL;
+        Il2CppClass *typec = gm_class(NULL, "System", "Type");
+        Il2CppMethodInfo *tgtype = typec && a->class_get_method_from_name
+            ? a->class_get_method_from_name(typec, "GetType", 1) : NULL;
+        if (!gc || !tgtype || !a->string_new)
+            return;
+
+        char aq[256];
+        snprintf(aq, sizeof aq, "%.200s, Assembly-CSharp", fw->cls);
+        Il2CppObject *ex = NULL;
+        void *pa[1];
+        pa[0] = a->string_new(aq);
+        Il2CppObject *tn = a->runtime_invoke(tgtype, NULL, pa, &ex);
+        if (!tn || ex)
             continue;
-        /* GetComponent on the found object, then write the field */
-        gmi_t *a = A2();
-        Il2CppObject *comp = NULL;
-        Il2CppMethodInfo *gc = a->class_get_method_from_name(
-            gm_class(NULL, "UnityEngine", "Component"), "GetComponent", 1);
-        (void)gc;
-        if (!comp) {
-            /* fall back: fields are written on the component resolved by name
-             * in the object's own class list */
-            Il2CppClass *goc = a->object_get_class(go);
-            if (goc)
-                gm_set_float(go, fw->field, fw->value);
+        void *pb[1] = {tn};
+        ex = NULL;
+        Il2CppObject *comp = a->runtime_invoke(gc, go, pb, &ex);
+        if (!comp || ex)
+            continue;
+        if (!gm_set_float(comp, fw->field, fw->value)) {
+            static int warnedf[GM_MAX_FIELDS];
+            if (!warnedf[i]) {
+                warnedf[i] = 1;
+                GM_LOGW("%s: no float field '%s' on %s", m->id, fw->field, fw->cls);
+            }
         }
     }
 }
@@ -334,6 +384,10 @@ void gm_mods_tick(void) {
     }
     scan();
     apply_all();
+}
+
+int gm_mod_field_count(int i) {
+    return (i >= 0 && i < g_nmods) ? g_mods[i].nfields : -1;
 }
 
 int gm_mod_count(void) {

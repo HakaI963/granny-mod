@@ -75,6 +75,10 @@ void gm_post(void (*)(void *), void *);
 /* hooks.c — detours on managed method pointers */
 void gm_hooks_install(void);
 
+/* input.c / menu.c — pointer state poll, so a tap can be detected even when
+ * UGUI interface dispatch is not reachable from a method-pointer detour */
+void gm_input_probe(void);
+
 /* menu.c — the Mods button and in-app mod browser */
 bool gm_menu_install(void);
 /* returns true when the click belonged to a Mods widget and the game's own

@@ -662,6 +662,7 @@ void gm_pump_main(void) {
         GM_LOGI("pump: first tick on the Unity main thread");
     gm_drain();
     gm_mods_tick();
+    gm_input_probe();
     if (!atomic_load(&g_ui_done)) {
         if (gm_menu_install()) {
             atomic_store(&g_ui_done, true);

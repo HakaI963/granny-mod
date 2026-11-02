@@ -96,6 +96,12 @@ int main(void) {
 
     gm_mods_tick();
 
+    {
+        extern int gm_mod_field_count(int);
+        printf("count=%d fields:", gm_mod_count());
+        for (int i = 0; i < gm_mod_count(); i++) printf(" [%d]=%d", i, gm_mod_field_count(i));
+        printf("\n");
+    }
     printf("count=%d names:", gm_mod_count());
     for (int i=0;i<gm_mod_count();i++) printf(" [%d]='%s'", i, gm_mod_name(i));
     printf("\n");
@@ -116,6 +122,14 @@ int main(void) {
 
     /* name defaulting from the folder id when the JSON key is absent */
     CHECK(gm_mod_name(broken) != NULL);
+
+    /* The targets block must actually parse. A previous bug left *s on the
+     * opening quote of "targets", so every mod loaded with 0 fields and no value
+     * was ever applied - which the discovery log happily reported as "0 fields". */
+    extern int gm_mod_field_count(int);
+    CHECK(gm_mod_field_count(fast) == 3);
+    CHECK(gm_mod_field_count(sleepy) == 1);
+    CHECK(gm_mod_field_count(broken) == 0); /* truncated JSON must not yield junk */
 
     CHECK(gm_mod_enabled(fast) == true);  /* default on */
     CHECK(gm_mod_enabled(sleepy) == false);

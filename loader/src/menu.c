@@ -49,6 +49,8 @@ static bool s_browser_open;
 /* Defined below; used by gm_menu_install. */
 static void log_screen(void);
 static bool read_anchored(Il2CppObject *go, float *x, float *y);
+static bool read_pos(Il2CppObject *go, float *x, float *y);
+void gm_pointer_press(float x, float y);
 static void log_pos(Il2CppObject *go, const char *tag);
 static bool add_text_label(Il2CppObject *parentGo, const char *want);
 
@@ -316,8 +318,25 @@ static void log_screen(void) {
     GM_LOGI("Unity screen is %dx%d", gm_boxed_int(invoke0(w, NULL)), gm_boxed_int(invoke0(h, NULL)));
 }
 
-/* Position of a GameObject's transform in Unity world/screen units, so a tap can
- * be aimed at the button we just created. */
+/* World/screen position of a GameObject's transform. For a screen-space overlay
+ * canvas this is pixels from the bottom left. */
+static bool read_pos(Il2CppObject *go, float *x, float *y) {
+    gmi_t *a = A2();
+    Il2CppObject *t = transform_of(go);
+    if (!t)
+        return false;
+    Il2CppClass *tc = gm_class(NULL, "UnityEngine", "Transform");
+    if (!tc)
+        return false;
+    Il2CppMethodInfo *gp = a->class_get_method_from_name(tc, "get_position", 0);
+    if (!gp)
+        return false;
+    Il2CppObject *box = invoke0(gp, t);
+    if (!box)
+        return false;
+    return gm_get_float(box, "x", x) && gm_get_float(box, "y", y);
+}
+
 static void log_pos(Il2CppObject *go, const char *tag) {
     gmi_t *a = A2();
     Il2CppObject *t = transform_of(go);
@@ -458,6 +477,59 @@ static bool add_text_label(Il2CppObject *parentGo, const char *want) {
     return false;
 }
 
+/* ---- pointer probe ----------------------------------------------------- */
+
+/*
+ * UnityEngine.UI.Button.OnPointerClick is detoured, but Button reaches that code
+ * through the IPointerClickHandler interface, and il2cpp dispatches interface
+ * calls through the class vtable - a copy of the target taken at class-init time.
+ * Swapping MethodInfo.methodPointer therefore does not redirect it, and 24
+ * injected taps produced no click line at all while the EventSystem pump kept
+ * ticking. So the Mods UI also reads the pointer itself: Input is a static class,
+ * reached through runtime_invoke, which needs no dispatch patch at all.
+ *
+ * For a screen-space-overlay canvas, Unity world units are pixels from the bottom
+ * left, which is the same space Input.mousePosition reports, so the button's
+ * logged position can be compared directly against the pointer.
+ */
+static bool s_down_prev;
+static unsigned s_probe_log;
+
+void gm_input_probe(void) {
+    gmi_t *a = A2();
+    Il2CppClass *input = gm_class(NULL, "UnityEngine", "Input");
+    if (!input)
+        return;
+    Il2CppMethodInfo *gmb = a->class_get_method_from_name(input, "GetMouseButton", 1);
+    Il2CppMethodInfo *gmp = a->class_get_method_from_name(input, "get_mousePosition", 0);
+    if (!gmb || !gmp) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            GM_LOGW("no Input.GetMouseButton/get_mousePosition; pointer polling unavailable");
+        }
+        return;
+    }
+    int zero = 0;
+    void *p0[1] = {&zero};
+    Il2CppObject *ex = NULL;
+    Il2CppObject *downb = a->runtime_invoke(gmb, NULL, p0, &ex);
+    Il2CppObject *posb = a->runtime_invoke(gmp, NULL, NULL, &ex);
+    bool down = gm_boxed_int(downb) != 0;
+    float mx = 0, my = 0;
+    if (posb) {
+        gm_get_float(posb, "x", &mx);
+        gm_get_float(posb, "y", &my);
+    }
+    if ((down || mx != 0 || my != 0) && (s_probe_log++ % 15) == 0)
+        GM_LOGI("pointer: (%.1f, %.1f) down=%d prev=%d", mx, my, (int)down, (int)s_down_prev);
+    if (down && !s_down_prev) {
+        /* rising edge: hand it to the button logic, which hit-tests ModsButton */
+        gm_pointer_press(mx, my);
+    }
+    s_down_prev = down;
+}
+
 /* ---- public ------------------------------------------------------------ */
 
 static unsigned s_attempts;
@@ -591,6 +663,40 @@ static void rows_build(void) {
 
 /* Called from the Button.OnPointerClick detour. Returns true when the click was
  * ours and the game's own handler must not run. */
+/* Hit-test a raw press against the Mods widgets. Positions are in the same
+ * screen-pixel space the loader logged for the buttons. */
+void gm_pointer_press(float x, float y) {
+    if (!s_mods_go)
+        return;
+    float px = 0, py = 0;
+    log_pos(s_mods_go, "hit-test-mods");
+    if (!read_pos(s_mods_go, &px, &py))
+        return;
+    /* PlayButton is 160x30 in canvas units; accept a generous box around it */
+    if (fabsf(x - px) <= 90.0f && fabsf(y - py) <= 22.0f) {
+        s_browser_open = !s_browser_open;
+        if (s_browser_open)
+            rows_build();
+        else
+            rows_clear();
+        GM_LOGI("mods browser %s (%d mods found) via pointer press", s_browser_open ? "open" : "closed",
+                gm_mod_count());
+        return;
+    }
+    if (s_browser_open) {
+        for (int i = 0; i < s_nrows; i++) {
+            float rx = 0, ry = 0;
+            if (s_rows[i] && read_pos(s_rows[i], &rx, &ry) && fabsf(x - rx) <= 90.0f &&
+                fabsf(y - ry) <= 22.0f) {
+                gm_mod_toggle(i);
+                GM_LOGI("toggled mod %d via pointer press", i);
+                rows_build();
+                return;
+            }
+        }
+    }
+}
+
 bool gm_button_click(void *button, void *pointer_data) {
     (void)pointer_data;
     gmi_t *a = A2();
