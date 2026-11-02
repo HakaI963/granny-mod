@@ -213,8 +213,12 @@ static void load_mod(const char *dir, const char *id) {
         parse_targets(txt, m);
 
     g_nmods++;
-    GM_LOGI("mod '%s' (%d fields, %s)", m->name, m->nfields, m->enabled ? "on" : "off");
 }
+
+/* Signature of the discovered set, so the 3-second rescan only logs (and only
+ * re-applies) when something actually changed. Without this the device log was
+ * flooded with the same two lines every 3 seconds. */
+static uint64_t s_scan_sig;
 
 static void scan(void) {
     g_nmods = 0;
@@ -233,6 +237,22 @@ static void scan(void) {
             load_mod(sub, e->d_name);
     }
     closedir(d);
+
+    uint64_t sig = 1469598103934665603ULL;
+    for (int i = 0; i < g_nmods; i++) {
+        const unsigned char *p = (const unsigned char *)g_mods[i].id;
+        for (; *p; p++) { sig ^= *p; sig *= 1099511628211ULL; }
+        sig ^= (uint64_t)g_mods[i].enabled;
+        sig ^= (uint64_t)g_mods[i].nfields << 8;
+    }
+    if (sig != s_scan_sig) {
+        s_scan_sig = sig;
+        for (int i = 0; i < g_nmods; i++)
+            GM_LOGI("mod '%s' (%d fields, %s)", g_mods[i].name, g_mods[i].nfields,
+                    g_mods[i].enabled ? "on" : "off");
+        if (!g_nmods)
+            GM_LOGI("no mods in %s", g_mods_path);
+    }
 }
 
 /* Apply one mod's field writes by name, against the live objects.

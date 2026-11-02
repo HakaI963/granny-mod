@@ -513,8 +513,26 @@ void gm_input_probe(void) {
     int zero = 0;
     void *p0[1] = {&zero};
     Il2CppObject *ex = NULL;
+    ex = NULL;
     Il2CppObject *downb = a->runtime_invoke(gmb, NULL, p0, &ex);
-    Il2CppObject *posb = a->runtime_invoke(gmp, NULL, NULL, &ex);
+    static bool reported_down;
+    if (ex && !reported_down) {
+        reported_down = true;
+        GM_LOGE("Input.GetMouseButton threw - the project likely uses the Input System "
+                "package, not legacy Input");
+    }
+    Il2CppObject *exc2 = NULL;
+    Il2CppObject *posb = a->runtime_invoke(gmp, NULL, NULL, &exc2);
+    static bool reported_pos;
+    if (exc2 && !reported_pos) {
+        reported_pos = true;
+        GM_LOGE("Input.get_mousePosition threw");
+    }
+    static bool reported_ok;
+    if (!reported_ok && !ex && !exc2) {
+        reported_ok = true;
+        GM_LOGI("pointer polling live (GetMouseButton + get_mousePosition both callable)");
+    }
     bool down = gm_boxed_int(downb) != 0;
     float mx = 0, my = 0;
     if (posb) {
