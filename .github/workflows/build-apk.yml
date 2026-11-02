@@ -1,0 +1,89 @@
+name: modded-apk
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  LUA_VERSION: 5.4.7
+  PKG: com.dvloper.granny.mod
+
+jobs:
+  loader:
+    name: native loader + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vendor Lua
+        run: |
+          mkdir -p loader/vendor
+          curl -fsSL "https://www.lua.org/ftp/lua-${LUA_VERSION}.tar.gz" -o lua.tgz
+          tar xzf lua.tgz
+          cp -r "lua-${LUA_VERSION}/src" loader/vendor/lua
+          test -f loader/vendor/lua/lapi.c
+
+      - name: Host tests
+        run: |
+          python3 patch/test_rename.py
+          gcc -std=gnu11 -Wall -Wextra -Iloader/src -Iloader/test/shim \
+              -o /tmp/gmtest loader/src/mods.c loader/test/harness.c
+          /tmp/gmtest
+
+      - uses: nttld/setup-ndk-action@v1
+        id: ndk
+        with:
+          ndk-version: r27b
+
+      - name: Build libgrannymod.so
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cmake -S loader -B loader/build \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 -DCMAKE_BUILD_TYPE=Release
+          cmake --build loader/build -j "$(nproc)"
+          test -f loader/build/libgrannymod.so
+          readelf -d loader/build/libgrannymod.so | head -12
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: loader-so
+          path: loader/build/libgrannymod.so
+
+  apk:
+    name: modded granny apk
+    needs: loader
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apktool zipalign apksigner
+
+      - name: Fetch the staged APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: loader-so
+          path: loader/build
+
+      - name: Restore base + split APKs from LFS
+        run: |
+          git lfs install
+          mkdir -p base
+          test -f base/granny-base.apk || { echo "base/granny-base.apk missing" >&2; exit 1; }
+          test -f base/granny-arm64.apk || { echo "base/granny-arm64.apk missing" >&2; exit 1; }
+
+      - name: Build
+        run: |
+          chmod +x build.sh
+          bash build.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: granny-modded-apk
+          path: granny-modded.apk

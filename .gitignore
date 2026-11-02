@@ -1,0 +1,12 @@
+base/
+granny-modded.apk
+loader/build/
+loader/vendor/
+*.log
+__pycache__/
+mod.keystore
+*.idsig
+
+# never commit the shipped game binaries
+*.apk
+!base/.keep
