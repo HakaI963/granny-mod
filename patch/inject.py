@@ -23,6 +23,20 @@ import axml_rename
 
 OLD = "com.dvloper.granny"
 DEX_MEMBER = "classes3.dex"
+# Signature block file names in a v1-signed jar. Everything else under
+# META-INF/ must survive: kotlinx.coroutines ships ServiceLoader entries there
+# (CoroutineExceptionHandler / MainDispatcherFactory) and dropping them breaks
+# startup for any code that touches Dispatchers.Main.
+_SIG_EXT = (".SF", ".RSA", ".DSA", ".EC", ".MF")
+
+
+def _is_signature(name: str) -> bool:
+    up = name.upper()
+    if not up.startswith("META-INF/"):
+        return False
+    if "/SERVICES/" in up or up.endswith(".VERSION") or ".version" in name:
+        return False
+    return up.endswith(_SIG_EXT) or "SIGNATURES" in up
 
 
 def rebuild(src: str, split: str, dex: str, module: str, newpkg: str, out: str) -> None:
@@ -35,7 +49,7 @@ def rebuild(src: str, split: str, dex: str, module: str, newpkg: str, out: str) 
             name = it.filename
             # META-INF is dropped (we re-sign); the manifest and dex are
             # re-added below from their patched copies, so skip the originals.
-            if name.startswith("META-INF/"):
+            if _is_signature(name):
                 continue
             if name == "AndroidManifest.xml" or (a_wants_dex and name == DEX_MEMBER):
                 continue
@@ -51,7 +65,8 @@ def rebuild(src: str, split: str, dex: str, module: str, newpkg: str, out: str) 
         tmp = out + ".axml"
         with open(tmp, "wb") as fh:
             fh.write(manifest)
-        axml_rename.patch_file(tmp, OLD, newpkg)
+        if newpkg and newpkg != OLD:
+            axml_rename.patch_file(tmp, OLD, newpkg)
         zout.write(tmp, "AndroidManifest.xml", zipfile.ZIP_STORED)
         os.remove(tmp)
 
