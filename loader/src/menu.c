@@ -356,6 +356,35 @@ static bool read_anchored(Il2CppObject *go, float *x, float *y) {
     return gm_get_float(box, "x", x) && gm_get_float(box, "y", y);
 }
 
+/* Walk a transform's direct children and return the GameObject whose name
+ * matches, or NULL. Needed because GameObject.Find only sees ACTIVE objects:
+ * the tree walk found 'Build Number' as a child of MenuButtons, while Find by
+ * that name returned nothing, so it is an inactive sibling. */
+static Il2CppObject *find_child_named(Il2CppObject *parentT, const char *want) {
+    gmi_t *a = A2();
+    if (!parentT)
+        return NULL;
+    Il2CppClass *tc = gm_class(NULL, "UnityEngine", "Transform");
+    if (!tc)
+        return NULL;
+    Il2CppMethodInfo *gc = a->class_get_method_from_name(tc, "GetChild", 1);
+    if (!gc)
+        return NULL;
+    for (int i = 0; i < 32; i++) {
+        int idx = i;
+        void *p[1] = {&idx};
+        Il2CppObject *ex = NULL;
+        Il2CppObject *kid = a->runtime_invoke(gc, parentT, p, &ex);
+        if (!kid)
+            break;
+        Il2CppObject *kidgo = go_of(kid);
+        char nm[128] = {0};
+        if (kidgo && name_of(kidgo, nm, sizeof nm) && !strcmp(nm, want))
+            return kidgo;
+    }
+    return NULL;
+}
+
 /* ---- label from a real text element ----------------------------------- */
 
 /*
@@ -369,6 +398,15 @@ static bool read_anchored(Il2CppObject *go, float *x, float *y) {
 static bool add_text_label(Il2CppObject *parentGo, const char *want) {
     gmi_t *a = A2();
     Il2CppObject *src = gm_find_object("Build Number");
+    if (!src) {
+        /* Not active, so Find cannot see it: walk the button container instead. */
+        Il2CppObject *pt = transform_of(s_play);
+        Il2CppMethodInfo *gp = method("UnityEngine", "Transform", "get_parent", 0);
+        Il2CppObject *menuT = pt && gp ? invoke0(gp, pt) : NULL;
+        src = find_child_named(menuT, "Build Number");
+        if (src)
+            GM_LOGI("found inactive sibling 'Build Number' by walking the container");
+    }
     if (!src) {
         GM_LOGW("no 'Build Number' text element to clone for the label");
         return false;
