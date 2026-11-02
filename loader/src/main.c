@@ -17,6 +17,7 @@
  * a MonoBehaviour that Unity calls every frame (see pump_hook).
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <elf.h>
 #include <link.h>
@@ -393,6 +394,65 @@ void gm_restore_prot(void *addr) {
         }
 }
 
+/* Is a given library leaf mapped into this process? */
+struct leaf_probe { const char *leaf; bool found; };
+
+static int leaf_probe_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    struct leaf_probe *p = (struct leaf_probe *)data;
+    if (!info->dlpi_name)
+        return 0;
+    const char *slash = strrchr(info->dlpi_name, '/');
+    const char *nm = slash ? slash + 1 : info->dlpi_name;
+    if (strcmp(nm, p->leaf) == 0) {
+        p->found = true;
+        return 1;
+    }
+    return 0;
+}
+
+static bool gm_lib_mapped(const char *leaf) {
+    struct leaf_probe probe = { leaf, false };
+    dl_iterate_phdr(leaf_probe_cb, &probe);
+    return probe.found;
+}
+
+/* Does a thread with this exact comm name exist in this process? */
+static bool gm_thread_exists(const char *name) {
+    DIR *d = opendir("/proc/self/task");
+    if (!d)
+        return false;
+    bool found = false;
+    struct dirent *e;
+    while (!found && (e = readdir(d))) {
+        if (e->d_name[0] == '.')
+            continue;
+        char path[128];
+        snprintf(path, sizeof path, "/proc/self/task/%s/comm", e->d_name);
+        FILE *f = fopen(path, "re");
+        if (!f)
+            continue;
+        char comm[64] = {0};
+        if (fgets(comm, sizeof comm, f)) {
+            char *nl = strchr(comm, '\n');
+            if (nl)
+                *nl = 0;
+            /* thread comm is truncated to 15 chars, so compare that prefix */
+            if (!strncmp(comm, name, 15))
+                found = true;
+        }
+        fclose(f);
+    }
+    closedir(d);
+    return found;
+}
+
+/* True when libil2cpp.so is mapped AND the UnityMain thread exists: neither can
+ * be true before il2cpp_init has run and the player loop has started. */
+static bool gm_runtime_observable_up(void) {
+    return gm_lib_mapped("libil2cpp.so") && gm_thread_exists("UnityMain");
+}
+
 bool gm_il2cpp_contains(const void *p) {
     if (!s_il2cpp_span)
         return false;
@@ -433,8 +493,33 @@ static void *gm_bind_thread(void *arg) {
         usleep(5 * 1000);
     }
     if (!atomic_load(&g_init_done)) {
-        GM_LOGE("il2cpp_init was never intercepted; not probing (probing early crashes the game)");
-        return NULL;
+        /*
+         * Observed in the field: the interception sometimes loses the race -
+         * libunity resolves il2cpp_init from its own init path before a 5ms poll
+         * can rewrite the GOT, and the run then logged "never intercepted" and
+         * loaded no mods at all. Refusing to probe was right (probing before
+         * il2cpp_init faults inside il2cpp), but being inert is not acceptable.
+         *
+         * Fallback: bind only once the runtime is observably up, judged by things
+         * that cannot be true before initialisation - libil2cpp.so is mapped and
+         * the UnityMain thread exists - plus a grace period, because those become
+         * true slightly before scripts finish booting.
+         */
+        int waited = 0;
+        while (waited < 600 && !atomic_load(&g_init_done)) {
+            if (gm_runtime_observable_up()) {
+                GM_LOGI("runtime observably up without interception; binding after grace period");
+                sleep(3);
+                atomic_store(&g_init_done, true);
+                break;
+            }
+            usleep(100 * 1000);
+            waited++;
+        }
+        if (!atomic_load(&g_init_done)) {
+            GM_LOGE("il2cpp_init neither intercepted nor observable; staying inert rather than crashing");
+            return NULL;
+        }
     }
     for (int i = 0; i < 400; i++) {
         if (gm_try_bind())
