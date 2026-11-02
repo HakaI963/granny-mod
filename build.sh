@@ -39,7 +39,7 @@ python3 patch/inject.py \
   --out "$W/unsigned.apk"
 
 # --- 3. align + sign -------------------------------------------------------
-zipalign -f 4 "$W/unsigned.apk" "$W/aligned.apk"
+zipalign -p -f 4 "$W/unsigned.apk" "$W/aligned.apk"
 
 if [ -n "${KEYSTORE:-}" ]; then
   apksigner sign --ks "$KEYSTORE" --ks-pass "pass:${KEYPASS}" \
