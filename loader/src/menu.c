@@ -607,6 +607,11 @@ bool gm_button_click(void *button, void *pointer_data) {
     if (!name_of(go, name, sizeof name))
         return false;
 
+    /* Log every click, ours or not: this is what proves the OnPointerClick detour
+     * is actually firing, and lets a missed tap be diagnosed as a coordinate
+     * problem rather than a broken hook. */
+    GM_LOGI("click on button '%s'%s", name, s_browser_open ? " (browser open)" : "");
+
     if (!strcmp(name, "ModsButton")) {
         s_browser_open = !s_browser_open;
         if (s_browser_open)
